@@ -11,7 +11,7 @@ require (
 	github.com/urfave/cli/v2 v2.27.6
 	github.com/urnetwork/connect v0.2.0
 	golang.org/x/net v0.39.0
-	gvisor.dev/gvisor v0.0.0-20250428223947-8d061298ccd2
+	gvisor.dev/gvisor v0.0.0-20250428193742-2d800c3129d5
 )
 
 require (
