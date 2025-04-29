@@ -159,13 +159,17 @@ func main() {
 				cfg.platformURL,
 				"my device",
 				"socks5",
-				"1.2.3",
+				"0.0.0",
 				// connect.DefaultClientSettingsNoNetworkEvents,
 				connect.DefaultClientSettings,
 				connect.DefaultApiMultiClientGeneratorSettings(),
 			)
 
-			dev, tnet, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr("192.168.3.3")}, []netip.Addr{netip.MustParseAddr("100.100.100.100")}, 1500)
+			dev, tnet, err := netstack.CreateNetTUN(
+				[]netip.Addr{netip.MustParseAddr("169.254.2.1")},
+				[]netip.Addr{netip.MustParseAddr("1.1.1.1")},
+				1440,
+			)
 			if err != nil {
 				return fmt.Errorf("create net tun failed: %w", err)
 			}

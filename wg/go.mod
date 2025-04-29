@@ -1,6 +1,6 @@
 module github.com/urnetwork/proxy/wg
 
-go 1.24.2
+go 1.24.0
 
 require (
 	github.com/google/gopacket v1.1.19
