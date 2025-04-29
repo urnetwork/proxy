@@ -4,7 +4,7 @@ This contains various proxy implementations to bridge URnetwork to other protoco
 
 `socks`
 
-A SOCKS5 proxy.
+A socks5 proxy.
 
 `wg`
 
