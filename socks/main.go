@@ -160,6 +160,7 @@ func main() {
 				"my device",
 				"socks5",
 				"0.0.0",
+				&clientID,
 				// connect.DefaultClientSettingsNoNetworkEvents,
 				connect.DefaultClientSettings,
 				connect.DefaultApiMultiClientGeneratorSettings(),
@@ -191,18 +192,20 @@ func main() {
 			go func() {
 				for {
 					packet := make([]byte, 1500)
-					n, err := dev.Read(packet)
+					n, _ := dev.Read(packet)
+					if 0 < n {
+						packet = packet[:n]
+						mc.SendPacket(
+							source,
+							protocol.ProvideMode_Network,
+							packet,
+							time.Second*15,
+						)
+					}
 					if err != nil {
 						fmt.Println("read error:", err)
 						return
 					}
-					packet = packet[:n]
-					mc.SendPacket(
-						source,
-						protocol.ProvideMode_Network,
-						packet,
-						time.Second*15,
-					)
 				}
 			}()
 

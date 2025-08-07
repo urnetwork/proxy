@@ -129,11 +129,7 @@ func (tun *netTun) Read(buf []byte) (int, error) {
 		return 0, os.ErrClosed
 	}
 
-	n, err := view.Read(buf)
-	if err != nil {
-		return 0, err
-	}
-	return n, nil
+	return view.Read(buf)
 }
 
 func (tun *netTun) Write(buf []byte) (int, error) {
