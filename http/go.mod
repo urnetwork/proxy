@@ -5,16 +5,15 @@ go 1.24.6
 require (
 	github.com/elazarl/goproxy v1.7.2
 	github.com/golang-jwt/jwt/v5 v5.3.0
-	github.com/golang/glog v1.2.5
 	github.com/google/gopacket v1.1.19
 	github.com/google/uuid v1.6.0
 	github.com/miekg/dns v1.1.68
 	github.com/prometheus/client_golang v1.23.0
 	github.com/redis/go-redis/v9 v9.12.0
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 	github.com/urfave/cli/v2 v2.27.7
 	github.com/urnetwork/connect v0.0.0
-	golang.org/x/sync v0.16.0
+	golang.org/x/sync v0.18.0
 	gvisor.dev/gvisor v0.0.0-20241009022347-94b16c128c1c
 )
 
@@ -33,21 +32,23 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.65.0 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
-	github.com/quic-go/quic-go v0.54.0 // indirect
+	github.com/quic-go/quic-go v0.57.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
+	github.com/urnetwork/glog v0.0.0 // indirect
 	github.com/xrash/smetrics v0.0.0-20250705151800-55b8f293f342 // indirect
-	go.uber.org/mock v0.5.2 // indirect
-	golang.org/x/crypto v0.41.0 // indirect
-	golang.org/x/exp v0.0.0-20250808145144-a408d31f581a // indirect
-	golang.org/x/mod v0.27.0 // indirect
-	golang.org/x/net v0.43.0 // indirect
-	golang.org/x/sys v0.35.0 // indirect
-	golang.org/x/text v0.28.0 // indirect
+	golang.org/x/crypto v0.45.0 // indirect
+	golang.org/x/exp v0.0.0-20251113190631-e25ba8c21ef6 // indirect
+	golang.org/x/mod v0.30.0 // indirect
+	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/sys v0.38.0 // indirect
+	golang.org/x/text v0.31.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
-	golang.org/x/tools v0.36.0 // indirect
-	google.golang.org/protobuf v1.36.7 // indirect
+	golang.org/x/tools v0.39.0 // indirect
+	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	src.agwa.name/tlshacks v0.0.0-20250628001001-c92050511ef4 // indirect
 )
 
 replace github.com/urnetwork/connect => ../../connect
+
+replace github.com/urnetwork/glog => ../../glog

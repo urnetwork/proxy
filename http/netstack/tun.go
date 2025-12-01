@@ -19,7 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/golang/glog"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 
@@ -36,6 +35,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
 
+	
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/proxy/http/dot"
 )
 

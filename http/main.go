@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"flag"
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
@@ -24,6 +25,22 @@ import (
 	"github.com/urnetwork/proxy/http/connprovider"
 	"github.com/urnetwork/proxy/http/ratelimiter"
 )
+
+
+func init() {
+	initGlog()
+}
+
+func initGlog() {
+	// flag.Set("logtostderr", "true")
+	flag.Set("alsologtostderr", "true")
+	flag.Set("stderrthreshold", "INFO")
+	flag.Set("v", "0")
+	// unlike unix, the android/ios standard is for diagnostics to go to stdout
+	os.Stderr = os.Stdout
+}
+
+
 
 // Prometheus metrics
 var (
