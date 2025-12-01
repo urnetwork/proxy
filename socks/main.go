@@ -21,6 +21,23 @@ import (
 	"github.com/urnetwork/proxy/socks/netstack"
 )
 
+// this value is set via the linker, e.g.
+// -ldflags "-X main.Version=$WARP_VERSION-$WARP_VERSION_CODE"
+var Version string
+
+func init() {
+	initGlog()
+}
+
+func initGlog() {
+	// flag.Set("logtostderr", "true")
+	flag.Set("alsologtostderr", "true")
+	flag.Set("stderrthreshold", "INFO")
+	flag.Set("v", "0")
+	// unlike unix, the android/ios standard is for diagnostics to go to stdout
+	os.Stderr = os.Stdout
+}
+
 func main() {
 	cfg := struct {
 		addr        string

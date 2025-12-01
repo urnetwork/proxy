@@ -27,6 +27,11 @@ import (
 )
 
 
+// this value is set via the linker, e.g.
+// -ldflags "-X main.Version=$WARP_VERSION-$WARP_VERSION_CODE"
+var Version string
+
+
 func init() {
 	initGlog()
 }
