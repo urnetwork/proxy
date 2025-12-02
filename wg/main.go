@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"flag"
 
 	"github.com/urnetwork/userwireguard/conn"
 	"github.com/urnetwork/userwireguard/device"
