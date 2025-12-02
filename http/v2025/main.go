@@ -21,9 +21,9 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/urfave/cli/v2"
 
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/proxy/http/connprovider"
-	"github.com/urnetwork/proxy/http/ratelimiter"
+	"github.com/urnetwork/connect/v2025"
+	"github.com/urnetwork/proxy/http/v2025/connprovider"
+	"github.com/urnetwork/proxy/http/v2025/ratelimiter"
 )
 
 
