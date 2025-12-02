@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"flag"
 
-	"github.com/urnetwork/userwireguard/conn"
-	"github.com/urnetwork/userwireguard/device"
-	"github.com/urnetwork/userwireguard/logger"
-	uwgtun "github.com/urnetwork/userwireguard/tun"
+	"github.com/urnetwork/userwireguard/v2025/conn"
+	"github.com/urnetwork/userwireguard/v2025/device"
+	"github.com/urnetwork/userwireguard/v2025/logger"
+	uwgtun "github.com/urnetwork/userwireguard/v2025/tun"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
