@@ -16,9 +16,9 @@ import (
 	"github.com/samber/lo"
 	"github.com/things-go/go-socks5"
 	"github.com/urfave/cli/v2"
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/connect/protocol"
-	"github.com/urnetwork/proxy/socks/netstack"
+	"github.com/urnetwork/connect/v2025"
+	"github.com/urnetwork/connect/v2025/protocol"
+	"github.com/urnetwork/proxy/socks/v2025/netstack"
 )
 
 // this value is set via the linker, e.g.
