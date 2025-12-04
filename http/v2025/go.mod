@@ -1,4 +1,4 @@
-module github.com/urnetwork/proxy/http
+module github.com/urnetwork/proxy/http/v2025
 
 go 1.24.6
 
@@ -12,7 +12,6 @@ require (
 	github.com/redis/go-redis/v9 v9.12.0
 	github.com/stretchr/testify v1.11.1
 	github.com/urfave/cli/v2 v2.27.7
-	github.com/urnetwork/connect v0.0.0
 	golang.org/x/sync v0.18.0
 	gvisor.dev/gvisor v0.0.0-20241009022347-94b16c128c1c
 )
@@ -32,12 +31,13 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.65.0 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
-	github.com/quic-go/quic-go v0.57.0 // indirect
+	github.com/quic-go/quic-go v0.57.1 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
-	github.com/urnetwork/glog v0.0.0 // indirect
+	github.com/urnetwork/connect/v2025 v2025.12.4-800893160
+	github.com/urnetwork/glog/v2025 v2025.12.4-800893160
 	github.com/xrash/smetrics v0.0.0-20250705151800-55b8f293f342 // indirect
 	golang.org/x/crypto v0.45.0 // indirect
-	golang.org/x/exp v0.0.0-20251113190631-e25ba8c21ef6 // indirect
+	golang.org/x/exp v0.0.0-20251125195548-87e1e737ad39 // indirect
 	golang.org/x/mod v0.30.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
@@ -48,7 +48,3 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	src.agwa.name/tlshacks v0.0.0-20250628001001-c92050511ef4 // indirect
 )
-
-replace github.com/urnetwork/connect => ../../connect
-
-replace github.com/urnetwork/glog => ../../glog
