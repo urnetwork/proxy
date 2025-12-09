@@ -1,4 +1,4 @@
-module github.com/urnetwork/proxy/socks
+module github.com/urnetwork/proxy/socks/v2025
 
 go 1.24.4
 
@@ -6,12 +6,10 @@ toolchain go1.24.5
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.0
-	github.com/golang/glog v1.2.5
 	github.com/google/gopacket v1.1.19
 	github.com/samber/lo v1.50.0
 	github.com/things-go/go-socks5 v0.0.6
 	github.com/urfave/cli/v2 v2.27.6
-	github.com/urnetwork/connect v0.0.0
 	golang.org/x/net v0.47.0
 	gvisor.dev/gvisor v0.0.0-20250428193742-2d800c3129d5
 )
@@ -21,7 +19,7 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	golang.org/x/crypto v0.45.0 // indirect
-	golang.org/x/exp v0.0.0-20251113190631-e25ba8c21ef6 // indirect
+	golang.org/x/exp v0.0.0-20251125195548-87e1e737ad39 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
@@ -31,12 +29,9 @@ require (
 
 require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
-	github.com/quic-go/quic-go v0.57.0 // indirect
+	github.com/quic-go/quic-go v0.57.1 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
-	github.com/urnetwork/glog v0.0.0 // indirect
+	github.com/urnetwork/connect/v2025 v2025.12.9-805116310
+	github.com/urnetwork/glog/v2025 v2025.12.9-805116310
 	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
 )
-
-replace github.com/urnetwork/connect => ../../connect
-
-replace github.com/urnetwork/glog => ../../glog
