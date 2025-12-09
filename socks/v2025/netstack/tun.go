@@ -41,7 +41,7 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 
 
-	"github.com/urnetwork/glog"
+	"github.com/urnetwork/glog/v2025"
 )
 
 type netTun struct {
