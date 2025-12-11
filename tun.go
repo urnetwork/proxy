@@ -42,7 +42,7 @@ type Net struct {
 	mtu                 int
 	mu                  sync.Mutex
 	registeredAddresses map[netip.Addr]bool
-	dotResolver         *connect.DohCache
+	dohResolver         *connect.DohCache
 }
 
 // type Net netTun
@@ -75,8 +75,10 @@ func CreateNetTUN(localAddresses []netip.Addr, mtu int) (Device, *Net, error) {
 	}
 
 	dohSettings := connect.DefaultDohSettings()
-	dohSettings.DialContextFunc = dev.DialContext
-	dev.dotResolver = connect.NewDohCache(dohSettings)
+	dohSettings.DialContextSettings = &connect.DialContextSettings{
+		DialContext: dev.DialContext,
+	}
+	dev.dohResolver = connect.NewDohCache(dohSettings)
 
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
 	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
@@ -625,7 +627,7 @@ func (tnet *Net) DialContext(ctx context.Context, network, address string) (net.
 
 		for _, recordType := range recordTypes {
 
-			resolvedAddrs := tnet.dotResolver.Query(ctx, recordType, host)
+			resolvedAddrs := tnet.dohResolver.Query(ctx, recordType, host)
 			for _, addr := range resolvedAddrs {
 				addrs = append(addrs, netip.AddrPortFrom(addr, uint16(port)))
 			}
