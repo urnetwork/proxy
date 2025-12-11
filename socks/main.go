@@ -19,7 +19,7 @@ import (
 	"github.com/urfave/cli/v2"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
-	"github.com/urnetwork/proxy/socks/netstack"
+	"github.com/urnetwork/proxy"
 )
 
 // this value is set via the linker, e.g.
@@ -184,9 +184,9 @@ func main() {
 				connect.DefaultApiMultiClientGeneratorSettings(),
 			)
 
-			dev, tnet, err := netstack.CreateNetTUN(
+			dev, tnet, err := proxy.CreateNetTUN(
 				[]netip.Addr{netip.MustParseAddr("169.254.2.1")},
-				[]netip.Addr{netip.MustParseAddr("1.1.1.1")},
+				// []netip.Addr{netip.MustParseAddr("1.1.1.1")},
 				1440,
 			)
 			if err != nil {
