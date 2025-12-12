@@ -15,7 +15,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/proxy/http/connprovider"
-	"github.com/urnetwork/proxy/http/netstack"
+	"github.com/urnetwork/proxy"
 )
 
 type ProxyStats struct {
@@ -54,7 +54,7 @@ func (p *ProxyStats) bytesReceived(n uint64) {
 type ClientProxy struct {
 	connectionInfo *connprovider.ConnectionInfo
 	generator      *connect.ApiMultiClientGenerator
-	dev            netstack.Device
+	dev            proxy.Device
 	nc             *connect.RemoteUserNatMultiClient
 	proxyServer    *goproxy.ProxyHttpServer
 	http.Handler
@@ -101,7 +101,7 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 		connect.DefaultApiMultiClientGeneratorSettings(),
 	)
 
-	dev, tnet, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr("192.168.3.3")}, 1500)
+	dev, tnet, err := proxy.CreateNetTUN([]netip.Addr{netip.MustParseAddr("192.168.3.3")}, 1500)
 	if err != nil {
 		return nil, fmt.Errorf("create net tun failed: %w", err)
 	}
