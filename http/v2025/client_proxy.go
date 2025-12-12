@@ -12,10 +12,10 @@ import (
 
 	"github.com/elazarl/goproxy"
 
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/connect/protocol"
-	"github.com/urnetwork/proxy/http/connprovider"
-	"github.com/urnetwork/proxy/http/netstack"
+	"github.com/urnetwork/connect/v2025"
+	"github.com/urnetwork/connect/v2025/protocol"
+	"github.com/urnetwork/proxy/http/v2025/connprovider"
+	"github.com/urnetwork/proxy/http/v2025/netstack"
 )
 
 type ProxyStats struct {
