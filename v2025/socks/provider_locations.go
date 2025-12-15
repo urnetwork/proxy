@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2025"
 )
 
 type FindLocationsArgs struct {
