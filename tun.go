@@ -45,6 +45,11 @@ type Net struct {
 	dohResolver         *connect.DohCache
 }
 
+
+func (self *Net) DohCache() *connect.DohCache {
+	return self.dohResolver
+}
+
 // type Net netTun
 
 type Device interface {
@@ -329,6 +334,11 @@ func (net *Net) DialUDPAddrPort(laddr, raddr netip.AddrPort) (*gonet.UDPConn, er
 		rfa = &addr
 	}
 	return gonet.DialUDP(net.stack, lfa, rfa, pn)
+}
+
+func (net *Net) DialContextUDP(ctx context.Context, addr *net.UDPAddr) (*gonet.UDPConn, error) {
+	// FIXME
+	return nil, nil
 }
 
 func (net *Net) ListenUDPAddrPort(laddr netip.AddrPort) (*gonet.UDPConn, error) {
