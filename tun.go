@@ -65,7 +65,7 @@ type Device interface {
 	Close() error
 }
 
-func CreateNetTUN(localAddresses []netip.Addr, mtu int) (Device, *Net, error) {
+func CreateNetTUN(localAddresses []netip.Addr, mtu int) (*Net, error) {
 	opts := stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol6, icmp.NewProtocol4},
@@ -88,12 +88,12 @@ func CreateNetTUN(localAddresses []netip.Addr, mtu int) (Device, *Net, error) {
 	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
 	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
 	if tcpipErr != nil {
-		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
+		return nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
 	}
 	dev.ep.AddNotify(dev)
 	tcpipErr = dev.stack.CreateNIC(1, dev.ep)
 	if tcpipErr != nil {
-		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
+		return nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
 	}
 	for _, ip := range localAddresses {
 		var protoNumber tcpip.NetworkProtocolNumber
@@ -108,14 +108,14 @@ func CreateNetTUN(localAddresses []netip.Addr, mtu int) (Device, *Net, error) {
 		}
 		tcpipErr := dev.stack.AddProtocolAddress(1, protoAddr, stack.AddressProperties{})
 		if tcpipErr != nil {
-			return nil, nil, fmt.Errorf("AddProtocolAddress(%v): %v", ip, tcpipErr)
+			return nil, fmt.Errorf("AddProtocolAddress(%v): %v", ip, tcpipErr)
 		}
 		dev.registeredAddresses[ip] = true
 	}
 	dev.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: 1})
 	dev.stack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: 1})
 
-	return dev, (*Net)(dev), nil
+	return dev, nil
 }
 
 func (tun *Net) Name() (string, error) {
@@ -336,9 +336,17 @@ func (net *Net) DialUDPAddrPort(laddr, raddr netip.AddrPort) (*gonet.UDPConn, er
 	return gonet.DialUDP(net.stack, lfa, rfa, pn)
 }
 
+func (net *Net) DialContextUDPAddrPort(ctx context.Context, addr netip.AddrPort) (*gonet.UDPConn, error) {
+	// FIXME ctx is ignored
+	return net.DialUDPAddrPort(netip.AddrPort{}, addr)
+}
+
 func (net *Net) DialContextUDP(ctx context.Context, addr *net.UDPAddr) (*gonet.UDPConn, error) {
-	// FIXME
-	return nil, nil
+	if addr == nil {
+		return net.DialContextUDPAddrPort(ctx, netip.AddrPort{})
+	}
+	ip, _ := netip.AddrFromSlice(addr.IP)
+	return net.DialContextUDPAddrPort(ctx, netip.AddrPortFrom(ip, uint16(addr.Port)))
 }
 
 func (net *Net) ListenUDPAddrPort(laddr netip.AddrPort) (*gonet.UDPConn, error) {

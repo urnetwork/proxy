@@ -184,7 +184,7 @@ func main() {
 				connect.DefaultApiMultiClientGeneratorSettings(),
 			)
 
-			dev, tnet, err := proxy.CreateNetTUN(
+			tnet, err := proxy.CreateNetTUN(
 				[]netip.Addr{netip.MustParseAddr("169.254.2.1")},
 				// []netip.Addr{netip.MustParseAddr("1.1.1.1")},
 				1440,
@@ -192,6 +192,7 @@ func main() {
 			if err != nil {
 				return fmt.Errorf("create net tun failed: %w", err)
 			}
+			dev := proxy.Device(tnet)
 
 			mc := connect.NewRemoteUserNatMultiClientWithDefaults(
 				ctx,

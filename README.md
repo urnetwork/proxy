@@ -52,3 +52,16 @@ Before you begin, ensure you have:
    - `socks` Follow the steps in socks/README.md to configure and launch the SOCKS5 proxy.
    - `wg`    See wg/EXAMPLE_SETUP.md for an example WireGuard setup and usage instructions.
    ```
+
+## Troubleshooting
+
+To solve the error below (common after `go get -u`), make sure `gvisor` is on the `go` branch:
+
+```
+go get gvisor.dev/gvisor@go
+```
+
+```
+# the gvisor error
+../../go/pkg/mod/gvisor.dev/gvisor@vxxx/pkg/tcpip/adapters/gonet/gonet.go:29:2: found packages stack (addressable_endpoint_state.go) and bridge (bridge_test.go) in /Users/brien/go/pkg/mod/gvisor.dev/gvisor@vxxx/pkg/tcpip/stack
+```
