@@ -12,8 +12,8 @@ require (
 	github.com/samber/lo v1.50.0
 	github.com/things-go/go-socks5 v0.0.6
 	github.com/urfave/cli/v2 v2.27.7
-	github.com/urnetwork/connect v0.2.0
-	github.com/urnetwork/glog v1.2.9
+	github.com/urnetwork/connect v0.0.0
+	github.com/urnetwork/glog v0.0.0
 	github.com/urnetwork/userwireguard v0.0.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 	gvisor.dev/gvisor v0.0.0-20260109181451-4be7c433dae2
