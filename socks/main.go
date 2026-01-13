@@ -185,6 +185,7 @@ func main() {
 			)
 
 			tnet, err := proxy.CreateNetTUN(
+				ctx,
 				[]netip.Addr{netip.MustParseAddr("169.254.2.1")},
 				// []netip.Addr{netip.MustParseAddr("1.1.1.1")},
 				1440,
