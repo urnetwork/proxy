@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	// "sync/atomic"
 	"syscall"
 	"time"
 
@@ -35,9 +36,17 @@ import (
 	"github.com/urnetwork/connect"
 )
 
+
+const DefaultProxySequenceSize = 1024
+const DefaultWriteTimeout = 15 * time.Second
+
+
 type Net struct {
+	ctx context.Context
+	cancel context.CancelFunc
 	ep                  *channel.Endpoint
 	stack               *stack.Stack
+	nicId tcpip.NICID
 	incomingPacket      chan *buffer.View
 	mtu                 int
 	mu                  sync.Mutex
@@ -46,8 +55,8 @@ type Net struct {
 }
 
 
-func (self *Net) DohCache() *connect.DohCache {
-	return self.dohResolver
+func (tnet *Net) DohCache() *connect.DohCache {
+	return tnet.dohResolver
 }
 
 // type Net netTun
@@ -65,33 +74,42 @@ type Device interface {
 	Close() error
 }
 
-func CreateNetTUN(localAddresses []netip.Addr, mtu int) (*Net, error) {
+// var nicIdCounter atomic.Uint32
+
+func CreateNetTUN(ctx context.Context, localAddresses []netip.Addr, mtu int) (*Net, error) {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	nicId := tcpip.NICID(1)
 	opts := stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocolWithOptions(ipv4.Options{AllowExternalLoopbackTraffic:true}), ipv6.NewProtocolWithOptions(ipv6.Options{AllowExternalLoopbackTraffic:true})},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol6, icmp.NewProtocol4},
 		HandleLocal:        true,
 	}
 	dev := &Net{
-		ep:                  channel.New(1024, uint32(mtu), ""),
+		ctx: cancelCtx,
+		cancel: cancel,
+		ep:                  channel.New(1024, uint32(mtu), tcpip.LinkAddress(fmt.Sprintf("%x", nicId))),
 		stack:               stack.New(opts),
-		incomingPacket:      make(chan *buffer.View),
+		nicId: nicId,
+		incomingPacket:      make(chan *buffer.View, DefaultProxySequenceSize),
 		mtu:                 mtu,
 		registeredAddresses: make(map[netip.Addr]bool),
 	}
 
 	dohSettings := connect.DefaultDohSettings()
-	dohSettings.DialContextSettings = &connect.DialContextSettings{
-		DialContext: dev.DialContext,
-	}
+	// FIXME
+	// dohSettings.DialContextSettings = &connect.DialContextSettings{
+	// 	DialContext: dev.DialContext,
+	// }
 	dev.dohResolver = connect.NewDohCache(dohSettings)
 
-	sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
-	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
-	if tcpipErr != nil {
-		return nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
-	}
+	// sackEnabledOpt := tcpip.TCPSACKEnabled(true) // TCP SACK is disabled by default
+	// tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
+	// if tcpipErr != nil {
+	// 	return nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
+	// }
 	dev.ep.AddNotify(dev)
-	tcpipErr = dev.stack.CreateNIC(1, dev.ep)
+	tcpipErr := dev.stack.CreateNIC(nicId, dev.ep)
 	if tcpipErr != nil {
 		return nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
 	}
@@ -106,14 +124,14 @@ func CreateNetTUN(localAddresses []netip.Addr, mtu int) (*Net, error) {
 			Protocol:          protoNumber,
 			AddressWithPrefix: tcpip.AddrFromSlice(ip.AsSlice()).WithPrefix(),
 		}
-		tcpipErr := dev.stack.AddProtocolAddress(1, protoAddr, stack.AddressProperties{})
+		tcpipErr := dev.stack.AddProtocolAddress(nicId, protoAddr, stack.AddressProperties{})
 		if tcpipErr != nil {
 			return nil, fmt.Errorf("AddProtocolAddress(%v): %v", ip, tcpipErr)
 		}
 		dev.registeredAddresses[ip] = true
 	}
-	dev.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: 1})
-	dev.stack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: 1})
+	dev.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: nicId})
+	dev.stack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: nicId})
 
 	return dev, nil
 }
@@ -127,16 +145,20 @@ func (tun *Net) File() *os.File {
 }
 
 func (tun *Net) Read(buf []byte) (int, error) {
-	view, ok := <-tun.incomingPacket
-	if !ok {
-		return 0, os.ErrClosed
-	}
+	select {
+	case <- tun.ctx.Done():
+		return 0, fmt.Errorf("Done")
+	case view, ok := <-tun.incomingPacket:
+		if !ok {
+			return 0, os.ErrClosed
+		}
 
-	n, err := view.Read(buf)
-	if err != nil {
-		return 0, err
+		n, err := view.Read(buf)
+		if err != nil {
+			return 0, err
+		}
+		return n, nil
 	}
-	return n, nil
 }
 
 func (tun *Net) Write(buf []byte) (int, error) {
@@ -170,7 +192,7 @@ func (tun *Net) Write(buf []byte) (int, error) {
 					AddressWithPrefix: tcpip.AddrFromSlice(v4.DstIP).WithPrefix(),
 				}
 
-				tcpipErr := tun.stack.AddProtocolAddress(1, protoAddr, stack.AddressProperties{})
+				tcpipErr := tun.stack.AddProtocolAddress(tun.nicId, protoAddr, stack.AddressProperties{})
 				if tcpipErr != nil {
 					return 0, fmt.Errorf("AddProtocolAddress(%v): %v", v4.DstIP, tcpipErr)
 				}
@@ -214,7 +236,7 @@ func (tun *Net) Write(buf []byte) (int, error) {
 					AddressWithPrefix: tcpip.AddrFromSlice(v6.DstIP).WithPrefix(),
 				}
 
-				tcpipErr := tun.stack.AddProtocolAddress(1, protoAddr, stack.AddressProperties{})
+				tcpipErr := tun.stack.AddProtocolAddress(tun.nicId, protoAddr, stack.AddressProperties{})
 				if tcpipErr != nil {
 					return 0, fmt.Errorf("AddProtocolAddress(%v): %v", v6.DstIP, tcpipErr)
 				}
@@ -242,19 +264,26 @@ func (tun *Net) WriteNotify() {
 	view := pkt.ToView()
 	pkt.DecRef()
 
-	tun.incomingPacket <- view
+	select {
+	case <- tun.ctx.Done():
+	case tun.incomingPacket <- view:
+	case <-time.After(DefaultWriteTimeout):
+		// drop
+	}
 }
 
 func (tun *Net) Close() error {
-	tun.stack.RemoveNIC(1)
+	tun.cancel()
+
+	tun.stack.RemoveNIC(tun.nicId)
 
 	tun.ep.Close()
 
 	tun.stack.Close()
 
-	if tun.incomingPacket != nil {
-		close(tun.incomingPacket)
-	}
+	// if tun.incomingPacket != nil {
+	// 	close(tun.incomingPacket)
+	// }
 
 	return nil
 }
@@ -267,7 +296,7 @@ func (tun *Net) BatchSize() int {
 	return 1
 }
 
-func convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
+func (tun *Net) convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
 	var protoNumber tcpip.NetworkProtocolNumber
 	if endpoint.Addr().Is4() {
 		protoNumber = ipv4.ProtocolNumber
@@ -275,27 +304,41 @@ func convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.Networ
 		protoNumber = ipv6.ProtocolNumber
 	}
 	return tcpip.FullAddress{
-		NIC:  1,
+		NIC:  tun.nicId,
 		Addr: tcpip.AddrFromSlice(endpoint.Addr().AsSlice()),
 		Port: endpoint.Port(),
 	}, protoNumber
 }
 
 func (net *Net) DialContextTCPAddrPort(ctx context.Context, addr netip.AddrPort) (*gonet.TCPConn, error) {
-	fa, pn := convertToFullAddr(addr)
-	return gonet.DialContextTCP(ctx, net.stack, fa, pn)
+	go func() {
+		select {
+		case <- ctx.Done():
+			net.cancel()
+		case <- net.ctx.Done():
+		}
+	}()
+	fa, pn := net.convertToFullAddr(addr)
+	return gonet.DialContextTCP(net.ctx, net.stack, fa, pn)
 }
 
 func (net *Net) DialContextTCP(ctx context.Context, addr *net.TCPAddr) (*gonet.TCPConn, error) {
+	go func() {
+		select {
+		case <- ctx.Done():
+			net.cancel()
+		case <- net.ctx.Done():
+		}
+	}()
 	if addr == nil {
-		return net.DialContextTCPAddrPort(ctx, netip.AddrPort{})
+		return net.DialContextTCPAddrPort(net.ctx, netip.AddrPort{})
 	}
 	ip, _ := netip.AddrFromSlice(addr.IP)
-	return net.DialContextTCPAddrPort(ctx, netip.AddrPortFrom(ip, uint16(addr.Port)))
+	return net.DialContextTCPAddrPort(net.ctx, netip.AddrPortFrom(ip, uint16(addr.Port)))
 }
 
 func (net *Net) DialTCPAddrPort(addr netip.AddrPort) (*gonet.TCPConn, error) {
-	fa, pn := convertToFullAddr(addr)
+	fa, pn := net.convertToFullAddr(addr)
 	return gonet.DialTCP(net.stack, fa, pn)
 }
 
@@ -308,7 +351,7 @@ func (net *Net) DialTCP(addr *net.TCPAddr) (*gonet.TCPConn, error) {
 }
 
 func (net *Net) ListenTCPAddrPort(addr netip.AddrPort) (*gonet.TCPListener, error) {
-	fa, pn := convertToFullAddr(addr)
+	fa, pn := net.convertToFullAddr(addr)
 	return gonet.ListenTCP(net.stack, fa, pn)
 }
 
@@ -325,18 +368,25 @@ func (net *Net) DialUDPAddrPort(laddr, raddr netip.AddrPort) (*gonet.UDPConn, er
 	var pn tcpip.NetworkProtocolNumber
 	if laddr.IsValid() || laddr.Port() > 0 {
 		var addr tcpip.FullAddress
-		addr, pn = convertToFullAddr(laddr)
+		addr, pn = net.convertToFullAddr(laddr)
 		lfa = &addr
 	}
 	if raddr.IsValid() || raddr.Port() > 0 {
 		var addr tcpip.FullAddress
-		addr, pn = convertToFullAddr(raddr)
+		addr, pn = net.convertToFullAddr(raddr)
 		rfa = &addr
 	}
 	return gonet.DialUDP(net.stack, lfa, rfa, pn)
 }
 
 func (net *Net) DialContextUDPAddrPort(ctx context.Context, addr netip.AddrPort) (*gonet.UDPConn, error) {
+	go func() {
+		select {
+		case <- ctx.Done():
+			net.cancel()
+		case <- net.ctx.Done():
+		}
+	}()
 	// FIXME ctx is ignored
 	return net.DialUDPAddrPort(netip.AddrPort{}, addr)
 }
@@ -371,6 +421,7 @@ func (net *Net) ListenUDP(laddr *net.UDPAddr) (*gonet.UDPConn, error) {
 }
 
 type PingConn struct {
+	net  *Net
 	laddr    PingAddr
 	raddr    PingAddr
 	wq       waiter.Queue
@@ -423,6 +474,7 @@ func (net *Net) DialPingAddr(laddr, raddr netip.Addr) (*PingConn, error) {
 	}
 
 	pc := &PingConn{
+		net: net,
 		laddr:    PingAddr{laddr},
 		deadline: time.NewTimer(time.Hour << 10),
 	}
@@ -435,7 +487,7 @@ func (net *Net) DialPingAddr(laddr, raddr netip.Addr) (*PingConn, error) {
 	pc.ep = ep
 
 	if bind {
-		fa, _ := convertToFullAddr(netip.AddrPortFrom(laddr, 0))
+		fa, _ := net.convertToFullAddr(netip.AddrPortFrom(laddr, 0))
 		if tcpipErr = pc.ep.Bind(fa); tcpipErr != nil {
 			return nil, fmt.Errorf("ping bind: %s", tcpipErr)
 		}
@@ -443,7 +495,7 @@ func (net *Net) DialPingAddr(laddr, raddr netip.Addr) (*PingConn, error) {
 
 	if raddr.IsValid() {
 		pc.raddr = PingAddr{raddr}
-		fa, _ := convertToFullAddr(netip.AddrPortFrom(raddr, 0))
+		fa, _ := net.convertToFullAddr(netip.AddrPortFrom(raddr, 0))
 		if tcpipErr = pc.ep.Connect(fa); tcpipErr != nil {
 			return nil, fmt.Errorf("ping connect: %s", tcpipErr)
 		}
@@ -508,7 +560,7 @@ func (pc *PingConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	}
 
 	buf := bytes.NewReader(p)
-	rfa, _ := convertToFullAddr(netip.AddrPortFrom(na, 0))
+	rfa, _ := pc.net.convertToFullAddr(netip.AddrPortFrom(na, 0))
 	// won't block, no deadlines
 	n64, tcpipErr := pc.ep.Write(buf, tcpip.WriteOptions{
 		To: &rfa,
@@ -530,9 +582,12 @@ func (pc *PingConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	defer pc.wq.EventUnregister(&e)
 
 	select {
+	case <-pc.net.ctx.Done():
+		return 0, nil, fmt.Errorf("Done")
 	case <-pc.deadline.C:
 		return 0, nil, os.ErrDeadlineExceeded
 	case <-notifyCh:
+		// FIXME ctx
 	}
 
 	w := tcpip.SliceWriter(p)
@@ -595,20 +650,24 @@ func partialDeadline(now, deadline time.Time, addrsRemaining int) (time.Time, er
 var protoSplitter = regexp.MustCompile(`^(tcp|udp|ping)(4|6)?$`)
 
 func (tnet *Net) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	if ctx == nil {
-		panic("nil context")
-	}
-	var acceptV4, acceptV6 bool
+	go func() {
+		select {
+		case <- ctx.Done():
+			tnet.cancel()
+		case <- tnet.ctx.Done():
+		}
+	}()
+	// var acceptV4, acceptV6 bool
 	matches := protoSplitter.FindStringSubmatch(network)
-	if matches == nil {
-		return nil, &net.OpError{Op: "dial", Err: net.UnknownNetworkError(network)}
-	} else if len(matches[2]) == 0 {
-		acceptV4 = true
-		acceptV6 = true
-	} else {
-		acceptV4 = matches[2][0] == '4'
-		acceptV6 = !acceptV4
-	}
+	// if matches == nil {
+	// 	return nil, &net.OpError{Op: "dial", Err: net.UnknownNetworkError(network)}
+	// } else if len(matches[2]) == 0 {
+	// 	acceptV4 = true
+	// 	acceptV6 = true
+	// } else {
+	// 	acceptV4 = matches[2][0] == '4'
+	// 	acceptV6 = !acceptV4
+	// }
 	var host string
 	var port int
 	if matches[1] == "ping" {
@@ -635,6 +694,8 @@ func (tnet *Net) DialContext(ctx context.Context, network, address string) (net.
 		// host is a domain name, requires resolving
 		// allAddr, err := tnet.LookupContextHost(ctx, host)
 
+		// FIXME doh is busted
+		/*
 		recordTypes := []string{}
 		if acceptV4 {
 			recordTypes = append(recordTypes, "A")
@@ -645,19 +706,38 @@ func (tnet *Net) DialContext(ctx context.Context, network, address string) (net.
 
 		for _, recordType := range recordTypes {
 
+
+			fmt.Printf("QUERY DOH t=%s host=%s\n", recordType, host)
+
 			resolvedAddrs := tnet.dohResolver.Query(ctx, recordType, host)
+			fmt.Printf("QUERY DOH t=%s host=%s resolved=%v\n", recordType, host, resolvedAddrs)
 			for _, addr := range resolvedAddrs {
 				addrs = append(addrs, netip.AddrPortFrom(addr, uint16(port)))
 			}
 
+
 		}
+		*/
+
+
+		resolver := &net.Resolver{}
+		ips, err := resolver.LookupIP(tnet.ctx, "ip4", host)
+		if err == nil {
+			for _, ip := range ips {
+				addr, ok := netip.AddrFromSlice(ip)
+				if ok {
+					addrs = append(addrs, netip.AddrPortFrom(addr, uint16(port)))
+				}
+			}
+		}
+
 	}
 
 	var firstErr error
 	for i, addr := range addrs {
 		select {
-		case <-ctx.Done():
-			err := ctx.Err()
+		case <-tnet.ctx.Done():
+			err := tnet.ctx.Err()
 			if err == context.Canceled {
 				err = errCanceled
 			} else if err == context.DeadlineExceeded {
@@ -667,8 +747,8 @@ func (tnet *Net) DialContext(ctx context.Context, network, address string) (net.
 		default:
 		}
 
-		dialCtx := ctx
-		if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
+		dialCtx := tnet.ctx
+		if deadline, hasDeadline := dialCtx.Deadline(); hasDeadline {
 			partialDeadline, err := partialDeadline(time.Now(), deadline, len(addrs)-i)
 			if err != nil {
 				if firstErr == nil {
