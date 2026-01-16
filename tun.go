@@ -332,31 +332,30 @@ func (tun *Net) convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, t
 	}, protoNumber
 }
 
-func (net *Net) DialContextTCPAddrPort(ctx context.Context, addr netip.AddrPort) (*gonet.TCPConn, error) {
+func (net *Net) dialCtx(ctx context.Context) context.Context {
+	dialCtx, dialCancel := context.WithCancel(net.ctx)
 	go func() {
+		defer dialCancel()
 		select {
 		case <- ctx.Done():
-			net.cancel()
 		case <- net.ctx.Done():
 		}
 	}()
+	return dialCtx
+}
+
+func (net *Net) DialContextTCPAddrPort(ctx context.Context, addr netip.AddrPort) (*gonet.TCPConn, error) {
 	fa, pn := net.convertToFullAddr(addr)
-	return gonet.DialContextTCP(net.ctx, net.stack, fa, pn)
+	return gonet.DialContextTCP(net.dialCtx(ctx), net.stack, fa, pn)
 }
 
 func (net *Net) DialContextTCP(ctx context.Context, addr *net.TCPAddr) (*gonet.TCPConn, error) {
-	go func() {
-		select {
-		case <- ctx.Done():
-			net.cancel()
-		case <- net.ctx.Done():
-		}
-	}()
-	if addr == nil {
-		return net.DialContextTCPAddrPort(net.ctx, netip.AddrPort{})
+	var addrPort netip.AddrPort
+	if addr != nil {
+		ip, _ := netip.AddrFromSlice(addr.IP)
+		addrPort = netip.AddrPortFrom(ip, uint16(addr.Port))
 	}
-	ip, _ := netip.AddrFromSlice(addr.IP)
-	return net.DialContextTCPAddrPort(net.ctx, netip.AddrPortFrom(ip, uint16(addr.Port)))
+	return net.DialContextTCPAddrPort(net.dialCtx(ctx), addrPort)
 }
 
 func (net *Net) DialTCPAddrPort(addr netip.AddrPort) (*gonet.TCPConn, error) {
@@ -402,14 +401,6 @@ func (net *Net) DialUDPAddrPort(laddr, raddr netip.AddrPort) (*gonet.UDPConn, er
 }
 
 func (net *Net) DialContextUDPAddrPort(ctx context.Context, addr netip.AddrPort) (*gonet.UDPConn, error) {
-	go func() {
-		select {
-		case <- ctx.Done():
-			net.cancel()
-		case <- net.ctx.Done():
-		}
-	}()
-	// FIXME ctx is ignored
 	return net.DialUDPAddrPort(netip.AddrPort{}, addr)
 }
 
@@ -672,13 +663,9 @@ func partialDeadline(now, deadline time.Time, addrsRemaining int) (time.Time, er
 var protoSplitter = regexp.MustCompile(`^(tcp|udp|ping)(4|6)?$`)
 
 func (tnet *Net) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	go func() {
-		select {
-		case <- ctx.Done():
-			tnet.cancel()
-		case <- tnet.ctx.Done():
-		}
-	}()
+
+	dialCtx := tnet.dialCtx(ctx)
+
 	// var acceptV4, acceptV6 bool
 	matches := protoSplitter.FindStringSubmatch(network)
 	// if matches == nil {
@@ -743,7 +730,7 @@ func (tnet *Net) DialContext(ctx context.Context, network, address string) (net.
 
 
 		resolver := &net.Resolver{}
-		ips, err := resolver.LookupIP(tnet.ctx, "ip4", host)
+		ips, err := resolver.LookupIP(dialCtx, "ip4", host)
 		if err == nil {
 			for _, ip := range ips {
 				addr, ok := netip.AddrFromSlice(ip)
@@ -769,7 +756,6 @@ func (tnet *Net) DialContext(ctx context.Context, network, address string) (net.
 		default:
 		}
 
-		dialCtx := tnet.ctx
 		if deadline, hasDeadline := dialCtx.Deadline(); hasDeadline {
 			partialDeadline, err := partialDeadline(time.Now(), deadline, len(addrs)-i)
 			if err != nil {
