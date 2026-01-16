@@ -11,7 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
-	// "sync/atomic"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -32,7 +32,7 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 
 	
-	"github.com/urnetwork/glog"
+	// "github.com/urnetwork/glog"
 	"github.com/urnetwork/connect"
 )
 
@@ -41,16 +41,27 @@ const DefaultProxySequenceSize = 1024
 const DefaultWriteTimeout = 15 * time.Second
 
 
+var tunStack = sync.OnceValue(func()(*stack.Stack) {
+	opts := stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocolWithOptions(ipv4.Options{AllowExternalLoopbackTraffic:true})},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4},
+		HandleLocal:        true,
+	}
+	return stack.New(opts)
+
+})
+
+
 type Net struct {
 	ctx context.Context
 	cancel context.CancelFunc
 	ep                  *channel.Endpoint
 	stack               *stack.Stack
 	nicId tcpip.NICID
-	incomingPacket      chan *buffer.View
+	incomingPacket      chan []byte
 	mtu                 int
 	mu                  sync.Mutex
-	registeredAddresses map[netip.Addr]bool
+	// registeredAddresses map[netip.Addr]bool
 	dohResolver         *connect.DohCache
 }
 
@@ -62,38 +73,50 @@ func (tnet *Net) DohCache() *connect.DohCache {
 // type Net netTun
 
 type Device interface {
-	Read(buf []byte) (n int, err error)
+	Read() ([]byte, error)
 
 	// Write one or more packets to the device (without any additional headers).
 	// On a successful write it returns the number of packets written. A nonzero
 	// offset can be used to instruct the Device on where to begin writing from
 	// each packet contained within the bufs slice.
-	Write(buf []byte) (int, error)
+	Write([]byte) (int, error)
 
 	// Close stops the Device and closes the Event channel.
 	Close() error
 }
 
-// var nicIdCounter atomic.Uint32
+// FIXME this should be a pool where closed nic ids and addrs can be reused
+var nicIdCounter atomic.Uint32
+var localIpv4AddressGenerator = sync.OnceValue(func()(*connect.AddrGenerator) {
+	prefix := netip.MustParsePrefix("169.254.0.0/16")
+	return connect.NewAddrGenerator(prefix)
+})
 
-func CreateNetTUN(ctx context.Context, localAddresses []netip.Addr, mtu int) (*Net, error) {
+func CreateNetTUN(ctx context.Context, mtu int) (*Net, error) {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	nicId := tcpip.NICID(1)
-	opts := stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocolWithOptions(ipv4.Options{AllowExternalLoopbackTraffic:true}), ipv6.NewProtocolWithOptions(ipv6.Options{AllowExternalLoopbackTraffic:true})},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol6, icmp.NewProtocol4},
-		HandleLocal:        true,
+	// ipv6.NewProtocolWithOptions(ipv6.Options{AllowExternalLoopbackTraffic:true})
+	// icmp.NewProtocol6, 
+	nicId := tcpip.NICID(nicIdCounter.Add(1))
+
+	localIpv4Address, ok := localIpv4AddressGenerator().Next()
+	if !ok {
+		return nil, fmt.Errorf("No more local addresses")
 	}
+
+	localAddresses := []netip.Addr{
+		localIpv4Address,
+	}
+	
 	dev := &Net{
 		ctx: cancelCtx,
 		cancel: cancel,
-		ep:                  channel.New(1024, uint32(mtu), tcpip.LinkAddress(fmt.Sprintf("%x", nicId))),
-		stack:               stack.New(opts),
+		ep:                  channel.New(DefaultProxySequenceSize, uint32(mtu), tcpip.LinkAddress(fmt.Sprintf("%x", nicId))),
+		stack:               tunStack(),
 		nicId: nicId,
-		incomingPacket:      make(chan *buffer.View, DefaultProxySequenceSize),
+		incomingPacket:      make(chan []byte, DefaultProxySequenceSize),
 		mtu:                 mtu,
-		registeredAddresses: make(map[netip.Addr]bool),
+		// registeredAddresses: make(map[netip.Addr]bool),
 	}
 
 	dohSettings := connect.DefaultDohSettings()
@@ -128,10 +151,10 @@ func CreateNetTUN(ctx context.Context, localAddresses []netip.Addr, mtu int) (*N
 		if tcpipErr != nil {
 			return nil, fmt.Errorf("AddProtocolAddress(%v): %v", ip, tcpipErr)
 		}
-		dev.registeredAddresses[ip] = true
+		// dev.registeredAddresses[ip] = true
 	}
 	dev.stack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: nicId})
-	dev.stack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: nicId})
+	// dev.stack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: nicId})
 
 	return dev, nil
 }
@@ -144,20 +167,15 @@ func (tun *Net) File() *os.File {
 	return nil
 }
 
-func (tun *Net) Read(buf []byte) (int, error) {
+func (tun *Net) Read() ([]byte, error) {
 	select {
 	case <- tun.ctx.Done():
-		return 0, fmt.Errorf("Done")
-	case view, ok := <-tun.incomingPacket:
+		return nil, fmt.Errorf("Done")
+	case m, ok := <-tun.incomingPacket:
 		if !ok {
-			return 0, os.ErrClosed
+			return nil, os.ErrClosed
 		}
-
-		n, err := view.Read(buf)
-		if err != nil {
-			return 0, err
-		}
-		return n, nil
+		return m, nil
 	}
 }
 
@@ -173,82 +191,82 @@ func (tun *Net) Write(buf []byte) (int, error) {
 
 	switch packet[0] >> 4 {
 	case 4:
-		packet := gopacket.NewPacket(packet, layers.LayerTypeIPv4, gopacket.NoCopy)
+		// packet := gopacket.NewPacket(packet, layers.LayerTypeIPv4, gopacket.NoCopy)
 
-		ipLayer := packet.Layer(layers.LayerTypeIPv4)
-		if ipLayer != nil {
-			v4, _ := ipLayer.(*layers.IPv4)
+		// ipLayer := packet.Layer(layers.LayerTypeIPv4)
+		// if ipLayer != nil {
+		// 	v4, _ := ipLayer.(*layers.IPv4)
 
-			addr := netip.AddrFrom4([4]byte(v4.DstIP))
+		// 	addr := netip.AddrFrom4([4]byte(v4.DstIP))
 
-			tun.mu.Lock()
-			registered := tun.registeredAddresses[addr]
-			tun.mu.Unlock()
+		// 	tun.mu.Lock()
+		// 	registered := tun.registeredAddresses[addr]
+		// 	tun.mu.Unlock()
 
-			if !registered {
+		// 	if !registered {
 
-				protoAddr := tcpip.ProtocolAddress{
-					Protocol:          ipv4.ProtocolNumber,
-					AddressWithPrefix: tcpip.AddrFromSlice(v4.DstIP).WithPrefix(),
-				}
+		// 		protoAddr := tcpip.ProtocolAddress{
+		// 			Protocol:          ipv4.ProtocolNumber,
+		// 			AddressWithPrefix: tcpip.AddrFromSlice(v4.DstIP).WithPrefix(),
+		// 		}
 
-				tcpipErr := tun.stack.AddProtocolAddress(tun.nicId, protoAddr, stack.AddressProperties{})
-				if tcpipErr != nil {
-					return 0, fmt.Errorf("AddProtocolAddress(%v): %v", v4.DstIP, tcpipErr)
-				}
+		// 		tcpipErr := tun.stack.AddProtocolAddress(tun.nicId, protoAddr, stack.AddressProperties{})
+		// 		if tcpipErr != nil {
+		// 			return 0, fmt.Errorf("AddProtocolAddress(%v): %v", v4.DstIP, tcpipErr)
+		// 		}
 
-				tun.mu.Lock()
-				tun.registeredAddresses[addr] = true
-				tun.mu.Unlock()
+		// 		tun.mu.Lock()
+		// 		tun.registeredAddresses[addr] = true
+		// 		tun.mu.Unlock()
 
-				glog.Info("Added protocol address: ", addr)
-			}
+		// 		glog.Info("Added protocol address: ", addr)
+		// 	}
 
-			tcpLayer := packet.Layer(layers.LayerTypeTCP)
+		// 	tcpLayer := packet.Layer(layers.LayerTypeTCP)
 
-			tcp, _ := tcpLayer.(*layers.TCP)
-			if tcp != nil {
-				if tcp.SYN {
-				}
-			}
+		// 	tcp, _ := tcpLayer.(*layers.TCP)
+		// 	if tcp != nil {
+		// 		if tcp.SYN {
+		// 		}
+		// 	}
 
-		}
+		// }
 
 		tun.ep.InjectInbound(header.IPv4ProtocolNumber, pkb)
-	case 6:
-		packet := gopacket.NewPacket(packet, layers.LayerTypeIPv6, gopacket.NoCopy)
-		// packet.String()
+	// case 6:
+	// 	packet := gopacket.NewPacket(packet, layers.LayerTypeIPv6, gopacket.NoCopy)
+	// 	// packet.String()
 
-		ipLayer := packet.Layer(layers.LayerTypeIPv6)
-		if ipLayer != nil {
-			v6, _ := ipLayer.(*layers.IPv6)
+	// 	ipLayer := packet.Layer(layers.LayerTypeIPv6)
+	// 	if ipLayer != nil {
+	// 		v6, _ := ipLayer.(*layers.IPv6)
 
-			addr := netip.AddrFrom16([16]byte(v6.DstIP))
+	// 		addr := netip.AddrFrom16([16]byte(v6.DstIP))
 
-			tun.mu.Lock()
-			registered := tun.registeredAddresses[addr]
-			tun.mu.Unlock()
+	// 		tun.mu.Lock()
+	// 		registered := tun.registeredAddresses[addr]
+	// 		tun.mu.Unlock()
 
-			if !registered {
+	// 		if !registered {
 
-				protoAddr := tcpip.ProtocolAddress{
-					Protocol:          ipv6.ProtocolNumber,
-					AddressWithPrefix: tcpip.AddrFromSlice(v6.DstIP).WithPrefix(),
-				}
+	// 			protoAddr := tcpip.ProtocolAddress{
+	// 				Protocol:          ipv6.ProtocolNumber,
+	// 				AddressWithPrefix: tcpip.AddrFromSlice(v6.DstIP).WithPrefix(),
+	// 			}
 
-				tcpipErr := tun.stack.AddProtocolAddress(tun.nicId, protoAddr, stack.AddressProperties{})
-				if tcpipErr != nil {
-					return 0, fmt.Errorf("AddProtocolAddress(%v): %v", v6.DstIP, tcpipErr)
-				}
+	// 			tcpipErr := tun.stack.AddProtocolAddress(tun.nicId, protoAddr, stack.AddressProperties{})
+	// 			if tcpipErr != nil {
+	// 				return 0, fmt.Errorf("AddProtocolAddress(%v): %v", v6.DstIP, tcpipErr)
+	// 			}
 
-				tun.mu.Lock()
-				tun.registeredAddresses[addr] = true
-				tun.mu.Unlock()
-			}
+	// 			tun.mu.Lock()
+	// 			tun.registeredAddresses[addr] = true
+	// 			tun.mu.Unlock()
+	// 		}
 
-		}
+	// 	}
 
-		tun.ep.InjectInbound(header.IPv6ProtocolNumber, pkb)
+	// 	tun.ep.InjectInbound(header.IPv6ProtocolNumber, pkb)
 	default:
 		return 0, syscall.EAFNOSUPPORT
 	}
@@ -262,13 +280,17 @@ func (tun *Net) WriteNotify() {
 	// }
 
 	view := pkt.ToView()
-	pkt.DecRef()
+	m := connect.MessagePoolGet(view.Capacity())
+	view.Read(m)
+	
 
 	select {
 	case <- tun.ctx.Done():
-	case tun.incomingPacket <- view:
+		connect.MessagePoolReturn(m)
+	case tun.incomingPacket <- m:
 	case <-time.After(DefaultWriteTimeout):
 		// drop
+		connect.MessagePoolReturn(m)
 	}
 }
 
@@ -279,7 +301,7 @@ func (tun *Net) Close() error {
 
 	tun.ep.Close()
 
-	tun.stack.Close()
+	// tun.stack.Close()
 
 	// if tun.incomingPacket != nil {
 	// 	close(tun.incomingPacket)
