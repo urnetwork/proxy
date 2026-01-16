@@ -101,7 +101,7 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 		connect.DefaultApiMultiClientGeneratorSettings(),
 	)
 
-	tnet, err := proxy.CreateNetTUN(ctx, []netip.Addr{netip.MustParseAddr("192.168.3.3")}, 1500)
+	tnet, err := proxy.CreateNetTUN(ctx, 1440)
 	if err != nil {
 		return nil, fmt.Errorf("create net tun failed: %w", err)
 	}
@@ -125,13 +125,11 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 
 	go func() {
 		for {
-			packet := make([]byte, 1500)
-			n, err := dev.Read(packet)
+			packet, err := dev.Read()
 			if err != nil {
 				fmt.Println("read error:", err)
 				return
 			}
-			packet = packet[:n]
 			mc.SendPacket(
 				source,
 				protocol.ProvideMode_Network,

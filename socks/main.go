@@ -186,8 +186,6 @@ func main() {
 
 			tnet, err := proxy.CreateNetTUN(
 				ctx,
-				[]netip.Addr{netip.MustParseAddr("169.254.2.1")},
-				// []netip.Addr{netip.MustParseAddr("1.1.1.1")},
 				1440,
 			)
 			if err != nil {
@@ -211,10 +209,8 @@ func main() {
 
 			go func() {
 				for {
-					packet := make([]byte, 1500)
-					n, _ := dev.Read(packet)
-					if 0 < n {
-						packet = packet[:n]
+					packet, err := dev.Read()
+					if err == nil {
 						mc.SendPacket(
 							source,
 							protocol.ProvideMode_Network,
