@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/netip"
+	// "net/netip"
 	"sync"
 	"time"
 
@@ -148,12 +148,12 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 			return tnet.DialContext(context.Background(), network, addr)
 		},
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			ap, err := netip.ParseAddrPort(addr)
-			if err != nil {
-				return nil, err
-			}
+			// ap, err := netip.ParseAddrPort(addr)
+			// if err != nil {
+			// 	return nil, err
+			// }
 
-			return tnet.DialContextTCP(ctx, net.TCPAddrFromAddrPort(ap))
+			return tnet.DialContext(ctx, network, addr)
 		},
 	}
 

@@ -43,6 +43,7 @@ require (
 	github.com/prometheus/procfs v0.17.0 // indirect
 	github.com/quic-go/quic-go v0.58.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
+	github.com/stripe/goproxy v0.0.0-20251009123132-ee3e713dae03 // indirect
 	github.com/xrash/smetrics v0.0.0-20250705151800-55b8f293f342 // indirect
 	golang.org/x/net v0.48.0 // indirect
 )

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/netip"
+	// "net/netip"
 	"os"
 	"slices"
 	"strings"
@@ -231,12 +231,12 @@ func main() {
 
 					fmt.Println("Dialing", network, addr, request.RawDestAddr.FQDN)
 
-					ap, err := netip.ParseAddrPort(addr)
-					if err != nil {
-						return nil, err
-					}
+					// ap, err := netip.ParseAddrPort(addr)
+					// if err != nil {
+					// 	return nil, err
+					// }
 
-					return tnet.DialContextTCP(ctx, net.TCPAddrFromAddrPort(ap))
+					return tnet.DialContext(ctx, "tcp", addr)
 				}),
 			)
 
