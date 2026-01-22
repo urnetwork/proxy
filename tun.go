@@ -595,7 +595,7 @@ func (tnet *Net) DialContext(ctx context.Context, network string, address string
 		// resolve ips using doh, local
 
 		resolvedAddrs := tnet.dohResolver.Query(dialCtx, "A", host)
-		glog.Infof("[tun]query doh (%s) found %v\n", host, resolvedAddrs)
+		glog.V(1).Infof("[tun]query doh (%s) found %v\n", host, resolvedAddrs)
 		for _, addr := range resolvedAddrs {
 			addrs = append(addrs, addr)
 		}
@@ -616,19 +616,19 @@ func (tnet *Net) DialContext(ctx context.Context, network string, address string
 			fa, pn := tnet.convertToFullAddr(addrPort)
 			conn, err := gonet.DialTCP(tnet.stack, fa, pn)
 			if err == nil {
-				glog.Infof("[tun]tcp connect (%s)->%s success\n", host, addrPort)
+				glog.V(1).Infof("[tun]tcp connect (%s)->%s success\n", host, addrPort)
 				return conn, nil
 			}
-			glog.Infof("[tun]tcp connect (%s)->%s err = %s\n", host, addrPort, err)
+			glog.V(1).Infof("[tun]tcp connect (%s)->%s err = %s\n", host, addrPort, err)
 			return nil, err
 		case "udp", "udp4", "udp6":
 			fa, pn := tnet.convertToFullAddr(addrPort)
 			conn, err := gonet.DialUDP(tnet.stack, nil, &fa, pn)
 			if err == nil {
-				glog.Infof("[tun]udp connect (%s)->%s success\n", host, addrPort)
+				glog.V(1).Infof("[tun]udp connect (%s)->%s success\n", host, addrPort)
 				return conn, nil
 			}
-			glog.Infof("[tun]tcp connect (%s)->%s err = %s\n", host, addrPort, err)
+			glog.V(1).Infof("[tun]tcp connect (%s)->%s err = %s\n", host, addrPort, err)
 			return nil, err
 		default:
 			return nil, fmt.Errorf("Unsupported network %s", network)
