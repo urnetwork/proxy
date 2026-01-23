@@ -205,10 +205,13 @@ func copyBufferWithTimeout(dst io.Writer, src io.Reader, buf []byte, readTimeout
 	return copyBufferWithTimeoutAndFlush(dst, src, buf, readTimeout, writeTimeout, nil)
 }
 
-// based on `io.copyBuffer` with read and write timeouts
+// based on `io.copyBuffer` with changes:
+// - default buffer 2kib
+// - read and write timeouts
+// - optional flush
 func copyBufferWithTimeoutAndFlush(dst io.Writer, src io.Reader, buf []byte, readTimeout time.Duration, writeTimeout time.Duration, flush func()) (written int64, err error) {
 	if buf == nil {
-		size := 32 * 1024
+		size := 2048
 		if l, ok := src.(*io.LimitedReader); ok && int64(size) > l.N {
 			if l.N < 1 {
 				size = 1
