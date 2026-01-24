@@ -159,7 +159,11 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 
 	tr := &http.Transport{
 		Dial: func(network string, addr string) (net.Conn, error) {
-			return self.ConnectDialWithRequest(r, network, addr)
+			return connect.HandleError2(func()(net.Conn, error) {
+				return self.ConnectDialWithRequest(r, network, addr)
+			}, func()(net.Conn, error) {
+				return nil, fmt.Errorf("Unexpected error")
+			})
 		},
 		DisableKeepAlives: true,
 		TLSHandshakeTimeout: self.ProxyTlsHandshakeTimeout,
