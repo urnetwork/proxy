@@ -11,7 +11,7 @@ import (
 	// "fmt"
 	// "sync"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 
