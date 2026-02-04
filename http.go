@@ -22,6 +22,7 @@ import (
 type HttpProxy struct {
 	ProxyReadTimeout time.Duration
 	ProxyWriteTimeout time.Duration
+	ProxyIdleTimeout time.Duration
 	// only used for http proxy
 	ProxyTlsHandshakeTimeout time.Duration
 	ConnectDialWithRequest func(r *http.Request, network string, addr string) (net.Conn, error)
@@ -38,6 +39,9 @@ func (self *HttpProxy) ListenAndServe(ctx context.Context, network string, addr 
 	httpServer := &http.Server{
 		Addr:      addr,
 		Handler:   self,
+		ReadTimeout: self.ProxyReadTimeout,
+		WriteTimeout: self.ProxyWriteTimeout,
+		IdleTimeout: self.ProxyIdleTimeout,
 	}
 
 
@@ -67,6 +71,9 @@ func (self *HttpProxy) ListenAndServeTls(ctx context.Context, network string, ad
 		Addr:      addr,
 		Handler:   self,
 		TLSConfig: tlsConfig,
+		ReadTimeout: self.ProxyReadTimeout,
+		WriteTimeout: self.ProxyWriteTimeout,
+		IdleTimeout: self.ProxyIdleTimeout,
 	}
 
 
