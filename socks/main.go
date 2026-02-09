@@ -184,7 +184,7 @@ func main() {
 				connect.DefaultApiMultiClientGeneratorSettings(),
 			)
 
-			tnet, err := proxy.CreateNetTUN(
+			tnet, err := proxy.CreateNetTun(
 				ctx,
 				1440,
 			)

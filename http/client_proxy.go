@@ -101,7 +101,7 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 		connect.DefaultApiMultiClientGeneratorSettings(),
 	)
 
-	tnet, err := proxy.CreateNetTUN(ctx, 1440)
+	tnet, err := proxy.CreateNetTun(ctx, 1440)
 	if err != nil {
 		return nil, fmt.Errorf("create net tun failed: %w", err)
 	}
