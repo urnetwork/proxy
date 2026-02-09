@@ -95,7 +95,11 @@ var localIpv4AddressGenerator = sync.OnceValue(func()(*connect.AddrGenerator) {
 })
 
 
-func CreateNetTUN(ctx context.Context, mtu int) (*Net, error) {
+func CreateNetTun(ctx context.Context, mtu int) (*Net, error) {
+	return CreateNetTunWithResolver(ctx, mtu, nil)
+}
+
+func CreateNetTunWithResolver(ctx context.Context, mtu int, dnsResolverSettings *connect.DnsResolverSettings) (*Net, error) {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	nicId := tcpip.NICID(nicIdCounter.Add(1))
@@ -124,6 +128,9 @@ func CreateNetTUN(ctx context.Context, mtu int) (*Net, error) {
 	dohSettings.TlsTimeout = 30 * time.Second
 	dohSettings.DialContextSettings = &connect.DialContextSettings{
 		DialContext: dev.DialContext,
+	}
+	if dnsResolverSettings != nil {
+		dohSettings.DnsResolverSettings = dnsResolverSettings
 	}
 	dev.dohResolver = connect.NewDohCache(dohSettings)
 
