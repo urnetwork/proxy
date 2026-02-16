@@ -184,14 +184,10 @@ func main() {
 				connect.DefaultApiMultiClientGeneratorSettings(),
 			)
 
-			tnet, err := proxy.CreateNetTun(
-				ctx,
-				1440,
-			)
+			dev, err := proxy.CreateTunWithDefaults(ctx)
 			if err != nil {
 				return fmt.Errorf("create net tun failed: %w", err)
 			}
-			dev := proxy.Device(tnet)
 
 			mc := connect.NewRemoteUserNatMultiClientWithDefaults(
 				ctx,
@@ -236,7 +232,7 @@ func main() {
 					// 	return nil, err
 					// }
 
-					return tnet.DialContext(ctx, "tcp", addr)
+					return dev.DialContext(ctx, "tcp", addr)
 				}),
 			)
 

@@ -54,7 +54,7 @@ func (p *ProxyStats) bytesReceived(n uint64) {
 type ClientProxy struct {
 	connectionInfo *connprovider.ConnectionInfo
 	generator      *connect.ApiMultiClientGenerator
-	dev            proxy.Device
+	dev            *proxy.Tun
 	nc             *connect.RemoteUserNatMultiClient
 	proxyServer    *goproxy.ProxyHttpServer
 	http.Handler
@@ -101,11 +101,10 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 		connect.DefaultApiMultiClientGeneratorSettings(),
 	)
 
-	tnet, err := proxy.CreateNetTun(ctx, 1440)
+	dev, err := proxy.CreateTunWithDefaults(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("create net tun failed: %w", err)
 	}
-	dev := proxy.Device(tnet)
 
 	mc := connect.NewRemoteUserNatMultiClientWithDefaults(
 		ctx,
@@ -145,7 +144,7 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 
 	proxy.Tr = &http.Transport{
 		Dial: func(network, addr string) (net.Conn, error) {
-			return tnet.DialContext(context.Background(), network, addr)
+			return dev.DialContext(context.Background(), network, addr)
 		},
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// ap, err := netip.ParseAddrPort(addr)
@@ -153,12 +152,12 @@ func NewClientProxy(ctx context.Context, cc ConnectionConfig) (*ClientProxy, err
 			// 	return nil, err
 			// }
 
-			return tnet.DialContext(ctx, network, addr)
+			return dev.DialContext(ctx, network, addr)
 		},
 	}
 
 	proxy.ConnectDialWithReq = func(req *http.Request, network string, addr string) (net.Conn, error) {
-		return tnet.DialContext(req.Context(), network, addr)
+		return dev.DialContext(req.Context(), network, addr)
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
