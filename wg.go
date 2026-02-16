@@ -23,6 +23,12 @@ import (
 )
 
 
+// FIXME currently the client ipv4 is threaded to the egress providers
+//       this can allow tracing a single client ipv4 across multiple providers
+//       it should be natted to a standard ipv4
+
+
+
 type WgClient struct {
 	PublicKey string
 	// TODO this is the signed proxy id
@@ -315,4 +321,16 @@ func WgGenKeyPair() (privateKey wgtypes.Key, publicKey wgtypes.Key, err error) {
 	return
 }
 
+
+func WgGenKeyPairStrings() (privateKeyStr string, publicKeyStr string, err error) {
+	var privateKey wgtypes.Key
+	var publicKey wgtypes.Key
+	privateKey, publicKey, err = WgGenKeyPair()
+	if err != nil {
+		return
+	}
+	privateKeyStr = privateKey.String()
+	publicKeyStr = publicKey.String()
+	return
+}
 
