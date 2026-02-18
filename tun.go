@@ -9,12 +9,12 @@ import (
 	"net/netip"
 	"os"
 	// "regexp"
+	mathrand "math/rand"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
-	mathrand "math/rand"
 
 	// "github.com/google/gopacket"
 	// "github.com/google/gopacket/layers"
@@ -32,11 +32,9 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	// "gvisor.dev/gvisor/pkg/waiter"
 
-	
-	"github.com/urnetwork/glog"
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/glog"
 )
-
 
 // const DefaultChannelSize = 64
 // const DefaultProxySequenceSize = 64
@@ -44,26 +42,21 @@ import (
 
 func DefaultTunSettings() *TunSettings {
 	return &TunSettings{
-		ChannelSize: 64,
+		ChannelSize:       64,
 		ProxySequenceSize: 64,
-		Mtu: 1440,
+		Mtu:               1440,
 	}
 }
 
-
-
-
 type TunSettings struct {
-	ChannelSize int
+	ChannelSize       int
 	ProxySequenceSize int
-	Mtu int
+	Mtu               int
 }
 
-
-
-var tunStack = sync.OnceValue(func()(*stack.Stack) {
+var tunStack = sync.OnceValue(func() *stack.Stack {
 	opts := stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocolWithOptions(ipv4.Options{AllowExternalLoopbackTraffic:true})},
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocolWithOptions(ipv4.Options{AllowExternalLoopbackTraffic: true})},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4},
 		HandleLocal:        true,
 	}
@@ -71,32 +64,28 @@ var tunStack = sync.OnceValue(func()(*stack.Stack) {
 
 })
 
-
 // FIXME this should be a pool where closed nic ids and addrs can be reused
 var nicIdCounter atomic.Uint32
-var localIpv4AddressGenerator = sync.OnceValue(func()(*connect.AddrGenerator) {
+var localIpv4AddressGenerator = sync.OnceValue(func() *connect.AddrGenerator {
 	prefix := netip.MustParsePrefix("169.254.0.0/16")
 	return connect.NewAddrGenerator(prefix)
 })
 
-
 type Tun struct {
-	ctx context.Context
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	settings *TunSettings
 
-	ep                  *channel.Endpoint
-	stack               *stack.Stack
-	nicId tcpip.NICID
-	receivePacket      chan []byte
+	ep            *channel.Endpoint
+	stack         *stack.Stack
+	nicId         tcpip.NICID
+	receivePacket chan []byte
 	// mtu                 int
 	// registeredAddresses map[netip.Addr]bool
-	dohResolver         *connect.DohCache
+	dohResolver *connect.DohCache
 
 	stateLock sync.Mutex
-	customReceivePacket chan []byte
-
 }
 
 func CreateTunWithDefaults(ctx context.Context) (*Tun, error) {
@@ -122,15 +111,15 @@ func CreateTunWithResolver(ctx context.Context, settings *TunSettings, dnsResolv
 	}
 
 	ep := channel.New(settings.ChannelSize, uint32(settings.Mtu), tcpip.LinkAddress(fmt.Sprintf("%x", nicId)))
-	
+
 	tun := &Tun{
-		ctx: cancelCtx,
-		cancel: cancel,
-		settings: settings,
-		ep:                  ep,
-		stack:               tunStack(),
-		nicId: nicId,
-		receivePacket:      make(chan []byte, settings.ProxySequenceSize),
+		ctx:           cancelCtx,
+		cancel:        cancel,
+		settings:      settings,
+		ep:            ep,
+		stack:         tunStack(),
+		nicId:         nicId,
+		receivePacket: make(chan []byte, settings.ProxySequenceSize),
 	}
 
 	dohSettings := connect.DefaultDohSettings()
@@ -160,7 +149,7 @@ func CreateTunWithResolver(ctx context.Context, settings *TunSettings, dnsResolv
 			Protocol:          protoNumber,
 			AddressWithPrefix: tcpip.AddrFromSlice(ip.AsSlice()).WithPrefix(),
 		}
-		
+
 		if tcpipErr := tun.stack.AddProtocolAddress(nicId, protoAddr, stack.AddressProperties{}); tcpipErr != nil {
 			return nil, fmt.Errorf("Could not create add nic address err=%s", tcpipErr)
 		}
@@ -172,31 +161,13 @@ func CreateTunWithResolver(ctx context.Context, settings *TunSettings, dnsResolv
 	return tun, nil
 }
 
-
-func (self *Tun) SetReceive(customReceivePacket chan []byte) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
-	self.customReceivePacket = customReceivePacket
-}
-
-func (self *Tun) receive() chan []byte {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
-	if self.customReceivePacket != nil {
-		return self.customReceivePacket
-	}
-	return self.receivePacket
-}
-
 func (self *Tun) DohCache() *connect.DohCache {
 	return self.dohResolver
 }
 
 func (self *Tun) Read() ([]byte, error) {
 	select {
-	case <- self.ctx.Done():
+	case <-self.ctx.Done():
 		return nil, fmt.Errorf("Done")
 	case m, ok := <-self.receivePacket:
 		if !ok {
@@ -243,12 +214,12 @@ func (self *Tun) WriteNotify() {
 	pkt.DecRef()
 
 	select {
-	case <- self.ctx.Done():
+	case <-self.ctx.Done():
 		connect.MessagePoolReturn(packet)
-	case self.receive() <- packet:
-	// case <-time.After(DefaultWriteTimeout):
-	// 	// drop
-	// 	connect.MessagePoolReturn(packet)
+	case self.receivePacket <- packet:
+		// case <-time.After(DefaultWriteTimeout):
+		// 	// drop
+		// 	connect.MessagePoolReturn(packet)
 	}
 }
 
@@ -274,8 +245,8 @@ func (self *Tun) dialCtx(ctx context.Context) context.Context {
 	go func() {
 		defer dialCancel()
 		select {
-		case <- ctx.Done():
-		case <- self.ctx.Done():
+		case <-ctx.Done():
+		case <-self.ctx.Done():
 		}
 	}()
 	return dialCtx
@@ -314,7 +285,7 @@ func (self *Tun) DialContext(ctx context.Context, network string, address string
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var addrs []netip.Addr
 	if addr, err := netip.ParseAddr(host); err == nil {
 		// address is ip:port
@@ -337,30 +308,30 @@ func (self *Tun) DialContext(ctx context.Context, network string, address string
 
 	// var returnErr error
 	// for _, addr := range addrs {
-		addrPort := netip.AddrPortFrom(addr, uint16(port))
+	addrPort := netip.AddrPortFrom(addr, uint16(port))
 
-		switch network {
-		case "tcp", "tcp4", "tcp6":
-			fa, pn := self.convertToFullAddr(addrPort)
-			conn, err := gonet.DialTCP(self.stack, fa, pn)
-			if err == nil {
-				glog.V(1).Infof("[tun]tcp connect (%s)->%s success\n", host, addrPort)
-				return conn, nil
-			}
-			glog.V(1).Infof("[tun]tcp connect (%s)->%s err = %s\n", host, addrPort, err)
-			return nil, err
-		case "udp", "udp4", "udp6":
-			fa, pn := self.convertToFullAddr(addrPort)
-			conn, err := gonet.DialUDP(self.stack, nil, &fa, pn)
-			if err == nil {
-				glog.V(1).Infof("[tun]udp connect (%s)->%s success\n", host, addrPort)
-				return conn, nil
-			}
-			glog.V(1).Infof("[tun]tcp connect (%s)->%s err = %s\n", host, addrPort, err)
-			return nil, err
-		default:
-			return nil, fmt.Errorf("Unsupported network %s", network)
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		fa, pn := self.convertToFullAddr(addrPort)
+		conn, err := gonet.DialTCP(self.stack, fa, pn)
+		if err == nil {
+			glog.V(1).Infof("[tun]tcp connect (%s)->%s success\n", host, addrPort)
+			return conn, nil
 		}
+		glog.V(1).Infof("[tun]tcp connect (%s)->%s err = %s\n", host, addrPort, err)
+		return nil, err
+	case "udp", "udp4", "udp6":
+		fa, pn := self.convertToFullAddr(addrPort)
+		conn, err := gonet.DialUDP(self.stack, nil, &fa, pn)
+		if err == nil {
+			glog.V(1).Infof("[tun]udp connect (%s)->%s success\n", host, addrPort)
+			return conn, nil
+		}
+		glog.V(1).Infof("[tun]tcp connect (%s)->%s err = %s\n", host, addrPort, err)
+		return nil, err
+	default:
+		return nil, fmt.Errorf("Unsupported network %s", network)
+	}
 	// }
 
 	// return nil, returnErr

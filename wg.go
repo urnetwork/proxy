@@ -1,76 +1,82 @@
 package proxy
 
-
 import (
 	"context"
-	"net"
-	"strconv"
-	"net/netip"
-	"sync"
-	"fmt"
 	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"strconv"
+	"sync"
+	"time"
 
 	"golang.org/x/exp/maps"
 
 	uwgtun "github.com/urnetwork/userwireguard/tun"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/userwireguard/conn"
 	"github.com/urnetwork/userwireguard/device"
 	"github.com/urnetwork/userwireguard/logger"
-	
 )
-
 
 // FIXME currently the client ipv4 is threaded to the egress providers
 //       this can allow tracing a single client ipv4 across multiple providers
 //       it should be natted to a standard ipv4
 
-
+var DidNotSendError = errors.New("did not send")
+var PacketTooLargeError = errors.New("packet too large for buffer")
 
 type WgClient struct {
 	PublicKey string
 	// TODO this is the signed proxy id
 	PresharedKey string
-	ClientIpv4 netip.Addr
-	Tun *Tun
+	ClientIpv4   netip.Addr
+	Tun          func() (WgTun, error)
 }
 
+type WgTun interface {
+	CancelIfIdle() bool
+	Send([]byte) bool
+	SetReceive(chan []byte)
+}
 
 func DefaultWgProxySettings() *WgProxySettings {
 	return &WgProxySettings{
 		ReceiveSequenceSize: 1024,
-		EventsSequenceSize: 16,
+		EventsSequenceSize:  16,
 	}
 }
 
-
 type WgProxySettings struct {
-	PrivateKey string
+	PrivateKey          string
 	ReceiveSequenceSize int
-	EventsSequenceSize int
+	EventsSequenceSize  int
+	EvictIdleTimeout    time.Duration
 }
 
-
 // implements wg device:
-// - parses packets from wg by source ip to forward to tun
-// - all packets from tuns are put back into wg
-//   the wg proxy reader is activated on first sent packet from the proxy
+//   - parses packets from wg by source ip to forward to tun
+//   - all packets from tuns are put back into wg
+//     the wg proxy reader is activated on first sent packet from the proxy
 type WgProxy struct {
-	ctx context.Context
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	settings *WgProxySettings
 
-	events chan uwgtun.Event
+	events  chan uwgtun.Event
 	receive chan []byte
-	
 
 	device *device.Device
 
 	stateLock sync.Mutex
 
-	clients map[netip.Addr]*WgClient
-	activeClients map[netip.Addr]*WgClient
+	clients       map[netip.Addr]*WgClient
+	activeClients map[netip.Addr]WgTun
 }
 
 func NewWgProxyWithDefaults(ctx context.Context) *WgProxy {
@@ -78,20 +84,53 @@ func NewWgProxyWithDefaults(ctx context.Context) *WgProxy {
 }
 
 func NewWgProxy(ctx context.Context, settings *WgProxySettings) *WgProxy {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
 	wg := &WgProxy{
-		ctx: ctx,
-		settings: settings,
-		events: make(chan uwgtun.Event, settings.EventsSequenceSize),
-		receive: make(chan []byte, settings.ReceiveSequenceSize),
-		clients: map[netip.Addr]*WgClient{},
-		activeClients: map[netip.Addr]*WgClient{},
+		ctx:           cancelCtx,
+		cancel:        cancel,
+		settings:      settings,
+		events:        make(chan uwgtun.Event, settings.EventsSequenceSize),
+		receive:       make(chan []byte, settings.ReceiveSequenceSize),
+		clients:       map[netip.Addr]*WgClient{},
+		activeClients: map[netip.Addr]WgTun{},
 	}
 
-	logLevel := logger.LogLevelVerbose
-	logger := logger.NewLogger(logLevel, "")
+	logger := &logger.Logger{
+		Verbosef: func(format string, args ...any) {
+			glog.Infof("[wg]"+format, args...)
+		},
+		Errorf: func(format string, args ...any) {
+			glog.Errorf("[wg]"+format, args...)
+		},
+	}
 	wg.device = device.NewDevice(wg, conn.NewDefaultBind(), logger)
 
+	go connect.HandleError(wg.run)
+
 	return wg
+}
+
+func (self *WgProxy) run() {
+	defer self.cancel()
+	for {
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+
+			for addr, tun := range self.activeClients {
+				if tun.CancelIfIdle() {
+					delete(self.activeClients, addr)
+				}
+			}
+		}()
+
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-time.After(self.settings.EvictIdleTimeout):
+		}
+	}
 }
 
 func (self *WgProxy) ListenAndServe(network string, addr string) error {
@@ -123,7 +162,7 @@ func (self *WgProxy) ListenAndServe(network string, addr string) error {
 		PrivateKey:   &privateKey,
 		ListenPort:   &port,
 		ReplacePeers: true,
-		Peers: []wgtypes.PeerConfig{},
+		Peers:        []wgtypes.PeerConfig{},
 	}
 
 	err = self.device.IpcSet(config)
@@ -139,10 +178,9 @@ func (self *WgProxy) ListenAndServe(network string, addr string) error {
 	return nil
 }
 
-
 // hot patches the devices into the wg server
 // if the device is already active, keep it active
-func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) error {
+func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
@@ -150,30 +188,36 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) error {
 
 	config := wgtypes.Config{
 		ReplacePeers: true,
-		Peers: peers,
+		Peers:        peers,
 	}
 
-	err := self.device.IpcSet(&config)
-	if err != nil {
-		return err
+	returnErr = self.device.IpcSet(&config)
+	if returnErr != nil {
+		return
 	}
 
 	self.clients = maps.Clone(clients)
-	for addr, activeClient := range self.activeClients {
+	for addr, activeTun := range self.activeClients {
 		if client, ok := self.clients[addr]; ok {
-			self.activeClients[addr] = client
-			client.Tun.SetReceive(self.receive)
+			tun, err := client.Tun()
+			if err == nil {
+				tun.SetReceive(self.receive)
+				self.activeClients[addr] = tun
+			} else {
+				delete(self.activeClients, addr)
+				returnErr = errors.Join(returnErr, err)
+			}
 		} else {
+			activeTun.SetReceive(nil)
 			delete(self.activeClients, addr)
-			activeClient.Tun.SetReceive(nil)
 		}
 	}
 
-	return nil
+	return
 }
 
 // if any devices are already active, keep them active
-func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) error {
+func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (returnErr error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
@@ -181,42 +225,54 @@ func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) error {
 
 	config := wgtypes.Config{
 		ReplacePeers: false,
-		Peers: peers,
+		Peers:        peers,
 	}
 
-	err := self.device.IpcSet(&config)
-	if err != nil {
-		return err
+	returnErr = self.device.IpcSet(&config)
+	if returnErr != nil {
+		return
 	}
 
 	self.clients = maps.Clone(clients)
 	for addr, client := range clients {
 		if _, ok := self.activeClients[addr]; ok {
-			self.activeClients[addr] = client
-			client.Tun.SetReceive(self.receive)
+			// refresh the tun
+			tun, err := client.Tun()
+			if err == nil {
+				tun.SetReceive(self.receive)
+				self.activeClients[addr] = tun
+			} else {
+				delete(self.activeClients, addr)
+				returnErr = errors.Join(returnErr, err)
+			}
 		}
 	}
 
-	return nil
+	return
 }
 
-func (self *WgProxy) activateClient(addr netip.Addr) (*WgClient, error) {
+func (self *WgProxy) activateClient(addr netip.Addr) (WgTun, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	client, ok := self.activeClients[addr]
+	tun, ok := self.activeClients[addr]
 	if ok {
-		return client, nil
+		return tun, nil
 	}
 
-	client, ok = self.clients[addr]
+	client, ok := self.clients[addr]
 	if ok {
-		client.Tun.SetReceive(self.receive)
-		self.activeClients[addr] = client
-		return client, nil
+		tun, err := client.Tun()
+		if err == nil {
+			tun.SetReceive(self.receive)
+			self.activeClients[addr] = tun
+			return tun, nil
+		} else {
+			return nil, err
+		}
 	}
 
-	return nil, fmt.Errorf("No client found.")
+	return nil, fmt.Errorf("No client found for %s.", addr)
 }
 
 func (self *WgProxy) MTU() int {
@@ -229,7 +285,7 @@ func (self *WgProxy) Events() <-chan uwgtun.Event {
 
 func (self *WgProxy) AddEvent(event uwgtun.Event) {
 	select {
-	case <- self.ctx.Done():
+	case <-self.ctx.Done():
 	case self.events <- event:
 	}
 }
@@ -244,16 +300,25 @@ func (self *WgProxy) Write(bufs [][]byte, offset int) (count int, returnErr erro
 		packet := buf[offset:]
 		// packet := gopacket.NewPacket(packet, layers.LayerTypeIPv4, gopacket.Default)
 
-		ipPath, err := connect.ParseIpPath(packet)
-		if err == nil {
-			destinationAddr, ok := netip.AddrFromSlice(ipPath.DestinationIp)
-			if ok {
-				client, err := self.activateClient(destinationAddr)
-				if err == nil {
-					_, err = client.Tun.Write(packet)
-				}
+		err := func() error {
+			ipPath, err := connect.ParseIpPath(packet)
+			if err != nil {
+				return err
 			}
-		}
+			sourceAddr, ok := netip.AddrFromSlice(ipPath.SourceIp)
+			if !ok {
+				return fmt.Errorf("Unknown source ip")
+			}
+			tun, err := self.activateClient(sourceAddr)
+			if err != nil {
+				return err
+			}
+			success := tun.Send(packet)
+			if !success {
+				return DidNotSendError
+			}
+			return nil
+		}()
 
 		if err == nil {
 			count += 1
@@ -264,14 +329,16 @@ func (self *WgProxy) Write(bufs [][]byte, offset int) (count int, returnErr erro
 	return
 }
 
+// `uwgtun.Device` implementation
 func (self *WgProxy) Read(bufs [][]byte, sizes []int, offset int) (count int, returnErr error) {
 	select {
-	case <- self.ctx.Done():
+	case <-self.ctx.Done():
 		return 0, fmt.Errorf("Done.")
-	case packet := <- self.receive:
+	case packet := <-self.receive:
+		defer connect.MessagePoolReturn(packet)
 		n := copy(bufs[0][offset:], packet)
 		if len(packet) < n {
-			returnErr = errors.Join(returnErr, fmt.Errorf("packet too large for buffer"))
+			returnErr = errors.Join(returnErr, PacketTooLargeError)
 		}
 		sizes[0] = n
 		count += 1
@@ -279,22 +346,29 @@ func (self *WgProxy) Read(bufs [][]byte, sizes []int, offset int) (count int, re
 	}
 }
 
+// `uwgtun.Device` implementation
 func (self *WgProxy) Close() error {
 	self.device.Close()
 	return nil
 }
-
 
 func createPeerConfigs(clients map[netip.Addr]*WgClient) []wgtypes.PeerConfig {
 	var peerConfigs []wgtypes.PeerConfig
 	for _, client := range clients {
 		publicKey, err := wgtypes.ParseKey(client.PublicKey)
 		if err == nil {
-			presharedKey, err := wgtypes.ParseKey(client.PresharedKey)
+			var presharedKey *wgtypes.Key
+			if client.PresharedKey != "" {
+				var presharedKey_ wgtypes.Key
+				presharedKey_, err = wgtypes.ParseKey(client.PresharedKey)
+				if err == nil {
+					presharedKey = &presharedKey_
+				}
+			}
 			if err == nil {
 				peerConfig := wgtypes.PeerConfig{
 					PublicKey:         publicKey,
-					PresharedKey: &presharedKey,
+					PresharedKey:      presharedKey,
 					ReplaceAllowedIPs: true,
 					AllowedIPs: []net.IPNet{
 						{
@@ -310,8 +384,6 @@ func createPeerConfigs(clients map[netip.Addr]*WgClient) []wgtypes.PeerConfig {
 	return peerConfigs
 }
 
-
-
 func WgGenKeyPair() (privateKey wgtypes.Key, publicKey wgtypes.Key, err error) {
 	privateKey, err = wgtypes.GeneratePrivateKey()
 	if err != nil {
@@ -320,7 +392,6 @@ func WgGenKeyPair() (privateKey wgtypes.Key, publicKey wgtypes.Key, err error) {
 	publicKey = privateKey.PublicKey()
 	return
 }
-
 
 func WgGenKeyPairStrings() (privateKeyStr string, publicKeyStr string, err error) {
 	var privateKey wgtypes.Key
@@ -333,4 +404,3 @@ func WgGenKeyPairStrings() (privateKeyStr string, publicKeyStr string, err error
 	publicKeyStr = publicKey.String()
 	return
 }
-
