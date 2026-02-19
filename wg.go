@@ -219,7 +219,7 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 	return
 }
 
-// if any devices are already active, keep them active
+// only clients not already in the state are added
 func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (returnErr error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -248,19 +248,6 @@ func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (returnErr err
 
 	for addr, client := range newClients {
 		self.clients[addr] = client
-	}
-	for addr, client := range newClients {
-		if _, ok := self.activeClients[addr]; ok {
-			// refresh the tun
-			tun, err := client.Tun()
-			if err == nil {
-				tun.SetReceive(self.receive)
-				self.activeClients[addr] = tun
-			} else {
-				delete(self.activeClients, addr)
-				returnErr = errors.Join(returnErr, err)
-			}
-		}
 	}
 
 	return
