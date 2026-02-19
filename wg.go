@@ -48,6 +48,7 @@ func DefaultWgProxySettings() *WgProxySettings {
 	return &WgProxySettings{
 		ReceiveSequenceSize: 1024,
 		EventsSequenceSize:  16,
+		CheckTunIdleTimeout: 1 * time.Minute,
 	}
 }
 
@@ -55,7 +56,7 @@ type WgProxySettings struct {
 	PrivateKey          string
 	ReceiveSequenceSize int
 	EventsSequenceSize  int
-	EvictIdleTimeout    time.Duration
+	CheckTunIdleTimeout time.Duration
 }
 
 // implements wg device:
@@ -118,8 +119,9 @@ func (self *WgProxy) run() {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 
-			for addr, tun := range self.activeClients {
-				if tun.CancelIfIdle() {
+			for addr, activeTun := range self.activeClients {
+				if activeTun.CancelIfIdle() {
+					activeTun.SetReceive(nil)
 					delete(self.activeClients, addr)
 				}
 			}
@@ -128,7 +130,7 @@ func (self *WgProxy) run() {
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(self.settings.EvictIdleTimeout):
+		case <-time.After(self.settings.CheckTunIdleTimeout):
 		}
 	}
 }
@@ -207,6 +209,7 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 				tun.SetReceive(self.receive)
 				self.activeClients[addr] = tun
 			} else {
+				activeTun.SetReceive(nil)
 				delete(self.activeClients, addr)
 				returnErr = errors.Join(returnErr, err)
 			}
