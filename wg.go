@@ -196,7 +196,10 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 		return
 	}
 
-	self.clients = maps.Clone(clients)
+	clear(self.clients)
+	for addr, client := range clients {
+		self.clients[addr] = client
+	}
 	for addr, activeTun := range self.activeClients {
 		if client, ok := self.clients[addr]; ok {
 			tun, err := client.Tun()
@@ -221,7 +224,17 @@ func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (returnErr err
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	peers := createPeerConfigs(clients)
+	newClients := maps.Clone(clients)
+	for addr, _ := range newClients {
+		if _, ok := self.clients[addr]; ok {
+			delete(newClients, addr)
+		}
+	}
+	if len(newClients) == 0 {
+		return
+	}
+
+	peers := createPeerConfigs(newClients)
 
 	config := wgtypes.Config{
 		ReplacePeers: false,
@@ -233,8 +246,10 @@ func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (returnErr err
 		return
 	}
 
-	self.clients = maps.Clone(clients)
-	for addr, client := range clients {
+	for addr, client := range newClients {
+		self.clients[addr] = client
+	}
+	for addr, client := range newClients {
 		if _, ok := self.activeClients[addr]; ok {
 			// refresh the tun
 			tun, err := client.Tun()
