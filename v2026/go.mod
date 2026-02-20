@@ -1,4 +1,4 @@
-module github.com/urnetwork/proxy
+module github.com/urnetwork/proxy/v2026
 
 go 1.25.5
 
@@ -12,9 +12,7 @@ require (
 	github.com/samber/lo v1.50.0
 	github.com/things-go/go-socks5 v0.1.0
 	github.com/urfave/cli/v2 v2.27.7
-	github.com/urnetwork/connect v0.0.0
-	github.com/urnetwork/glog v0.0.0
-	github.com/urnetwork/userwireguard v0.0.0
+	golang.org/x/exp v0.0.0-20260112195511-716be5621a96
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 	gvisor.dev/gvisor v0.0.0-20260202191832-0bd9aedd142c
 )
@@ -24,7 +22,6 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	golang.org/x/crypto v0.47.0 // indirect
-	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
@@ -43,13 +40,9 @@ require (
 	github.com/prometheus/procfs v0.17.0 // indirect
 	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
-	github.com/stripe/goproxy v0.0.0-20251009123132-ee3e713dae03 // indirect
+	github.com/urnetwork/connect/v2026 v2026.2.20-868307310
+	github.com/urnetwork/glog/v2026 v2026.2.20-868307310
+	github.com/urnetwork/userwireguard/v2026 v2026.2.20-868307310
 	github.com/xrash/smetrics v0.0.0-20250705151800-55b8f293f342 // indirect
 	golang.org/x/net v0.49.0 // indirect
 )
-
-replace github.com/urnetwork/connect => ../connect
-
-replace github.com/urnetwork/glog => ../glog
-
-replace github.com/urnetwork/userwireguard => ../userwireguard
