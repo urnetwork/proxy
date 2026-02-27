@@ -136,7 +136,6 @@ func (self *WgProxy) run() {
 }
 
 func (self *WgProxy) ListenAndServe(network string, addr string) error {
-
 	if network != "udp" {
 		return fmt.Errorf("network must be udp")
 	}
@@ -146,13 +145,13 @@ func (self *WgProxy) ListenAndServe(network string, addr string) error {
 		return err
 	}
 
-	if host != "" {
-		return fmt.Errorf("host bind not supported")
-	}
-
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		return err
+	}
+
+	if host != "" {
+		glog.Warningf("[wg]binding is not supported (%s:%d). WireGuard will listen on *:%d.\n", host, port, port)
 	}
 
 	privateKey, err := wgtypes.ParseKey(self.settings.PrivateKey)
