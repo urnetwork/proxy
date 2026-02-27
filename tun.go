@@ -45,6 +45,10 @@ func DefaultTunSettings() *TunSettings {
 		ChannelSize:       64,
 		ProxySequenceSize: 64,
 		Mtu:               1440,
+
+		DialRace:        4,
+		DialRaceTimeout: 2 * time.Second,
+		DialTimeout:     15 * time.Second,
 	}
 }
 
@@ -52,6 +56,10 @@ type TunSettings struct {
 	ChannelSize       int
 	ProxySequenceSize int
 	Mtu               int
+
+	DialRace        int
+	DialRaceTimeout time.Duration
+	DialTimeout     time.Duration
 }
 
 var tunStack = sync.OnceValue(func() *stack.Stack {
@@ -274,7 +282,37 @@ func (self *Tun) ListenUDP(laddr *net.UDPAddr) (*gonet.UDPConn, error) {
 
 // safe to call from multiple goroutines
 func (self *Tun) DialContext(ctx context.Context, network string, address string) (net.Conn, error) {
+	raceCtx, raceCancel := context.WithCancel(ctx)
+	defer raceCancel()
+	raceOut := make(chan net.Conn)
+	for range self.settings.DialRace {
+		go connect.HandleError(func() {
+			conn, err := self.dialContext(raceCtx, network, address)
+			if err == nil {
+				select {
+				case <-raceCtx.Done():
+				case raceOut <- conn:
+				}
+			}
+		})
+		select {
+		case conn := <-raceOut:
+			return conn, nil
+		case <-time.After(self.settings.DialRaceTimeout):
+		}
+	}
+	select {
+	case <-raceCtx.Done():
+		return nil, fmt.Errorf("Done.")
+	case conn := <-raceOut:
+		return conn, nil
+	case <-time.After(self.settings.DialTimeout - self.settings.DialRaceTimeout):
+		return nil, fmt.Errorf("Timeout.")
+	}
+}
 
+// safe to call from multiple goroutines
+func (self *Tun) dialContext(ctx context.Context, network string, address string) (net.Conn, error) {
 	dialCtx := self.dialCtx(ctx)
 
 	host, portStr, err := net.SplitHostPort(address)
