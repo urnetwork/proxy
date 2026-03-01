@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"strconv"
+	// "strconv"
 	"sync"
 	"time"
 
@@ -57,6 +57,7 @@ type WgProxySettings struct {
 	ReceiveSequenceSize int
 	EventsSequenceSize  int
 	CheckTunIdleTimeout time.Duration
+	FirewallMark        int
 }
 
 // implements wg device:
@@ -135,38 +136,28 @@ func (self *WgProxy) run() {
 	}
 }
 
-func (self *WgProxy) ListenAndServe(network string, addr string) error {
-	if network != "udp" {
-		return fmt.Errorf("network must be udp")
-	}
-
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return err
-	}
-
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return err
-	}
-
-	if host != "" {
-		glog.Warningf("[wg]binding is not supported (%s:%d). WireGuard will listen on *:%d.\n", host, port, port)
-	}
-
+func (self *WgProxy) ListenAndServe(ipv4 string, ipv6 string, port int) error {
 	privateKey, err := wgtypes.ParseKey(self.settings.PrivateKey)
 	if err != nil {
 		return err
 	}
 
-	config := &wgtypes.Config{
-		PrivateKey:   &privateKey,
-		ListenPort:   &port,
-		ReplacePeers: true,
-		Peers:        []wgtypes.PeerConfig{},
+	glog.Infof("[wg]ipv4=%s ipv6=%s port=%d fwmark=%d\n", ipv4, ipv6, port, self.settings.FirewallMark)
+	config := &device.Config{
+		Config: wgtypes.Config{
+			PrivateKey:   &privateKey,
+			ListenPort:   &port,
+			ReplacePeers: true,
+			Peers:        []wgtypes.PeerConfig{},
+		},
+		BindIpv4: &ipv4,
+		BindIpv6: &ipv6,
+	}
+	if 0 < self.settings.FirewallMark {
+		config.FirewallMark = &self.settings.FirewallMark
 	}
 
-	err = self.device.IpcSet(config)
+	err = self.device.IpcSet2(config)
 	if err != nil {
 		return err
 	}
