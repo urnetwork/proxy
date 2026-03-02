@@ -13,6 +13,7 @@ import (
 	"strings"
 	// "syscall"
 	"time"
+	// "sync"
 
 	// "github.com/elazarl/goproxy"
 	socks5 "github.com/things-go/go-socks5"
@@ -22,15 +23,13 @@ import (
 	"github.com/urnetwork/glog"
 )
 
-
 type SocksRequest = *socks5.Request
 
-
 type SocksProxy struct {
-	ProxyReadTimeout time.Duration
-	ProxyWriteTimeout time.Duration
+	ProxyReadTimeout       time.Duration
+	ProxyWriteTimeout      time.Duration
 	ConnectDialWithRequest func(ctx context.Context, r SocksRequest, network string, addr string) (net.Conn, error)
-	ValidUser func(user string, password string, userAddr string) bool
+	ValidUser              func(user string, password string, userAddr string) bool
 }
 
 func NewSocksProxy() *SocksProxy {
@@ -51,15 +50,14 @@ func (self *SocksProxy) ListenAndServe(ctx context.Context, network string, addr
 				return nil, fmt.Errorf("Unexpected error")
 			})
 		}),
-		socks5.WithConnectHandle(func(ctx context.Context, writer io.Writer, r SocksRequest)(error) {
-			return connect.HandleError1(func()(error) {
+		socks5.WithConnectHandle(func(ctx context.Context, writer io.Writer, r SocksRequest) error {
+			return connect.HandleError1(func() error {
 				return self.connectHandle(ctx, writer, r)
-			}, func()(error) {
+			}, func() error {
 				return fmt.Errorf("Unexpected error")
 			})
 		}),
 	)
-
 
 	listenConfig := net.ListenConfig{}
 
@@ -97,45 +95,21 @@ func (self *SocksProxy) connectHandle(ctx context.Context, writer io.Writer, r S
 		socks5.SendReply(writer, resp, nil)
 		return err
 	}
-	defer proxyConn.Close()
+	handleCtx, handleCancel := context.WithCancel(ctx)
+	defer handleCancel()
+	go connect.HandleError(func() {
+		defer proxyConn.Close()
+		select {
+		case <-handleCtx.Done():
+		}
+	})
 
 	if err := socks5.SendReply(writer, statute.RepSuccess, proxyConn.LocalAddr()); err != nil {
 		return err
 	}
 
-	handleCtx, handleCancel := context.WithCancel(ctx)
-	defer handleCancel()
-
-	errs := make(chan error)
-
-	go connect.HandleError(func() {
-		defer handleCancel()
-		_, err := copyBufferWithTimeout(proxyConn, r.Reader, nil, self.ProxyReadTimeout, self.ProxyWriteTimeout)
-		select {
-		case <- handleCtx.Done():
-		case errs <- err:
-		}
-	})
-
-	go connect.HandleError(func() {
-		defer handleCancel()
-		_, err := copyBufferWithTimeout(writer, proxyConn, nil, self.ProxyReadTimeout, self.ProxyWriteTimeout)
-		select {
-		case <- handleCtx.Done():
-		case errs <- err:
-		}
-	})
-
-	for {
-		select {
-		case <- handleCtx.Done():
-			return nil
-		case err := <- errs:
-			return err
-		}
-	}
+	return copyRw(handleCtx, handleCancel, r.Reader, writer, proxyConn, proxyConn, self.ProxyReadTimeout, self.ProxyWriteTimeout)
 }
-
 
 // socks.Logger
 func (self *SocksProxy) Errorf(format string, args ...any) {
@@ -156,5 +130,3 @@ func (self *SocksProxy) Resolve(ctx context.Context, name string) (context.Conte
 	// names are not resolved locally
 	return ctx, net.ParseIP("0.0.0.0").To4(), nil
 }
-
-

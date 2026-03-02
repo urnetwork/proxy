@@ -2,48 +2,48 @@ package proxy
 
 import (
 	"context"
-	"net"
-	"net/http"
 	"crypto/tls"
 	"io"
-	"time"
+	"net"
+	"net/http"
 	"strings"
+	"time"
 	// "errors"
 	"fmt"
 	// "sync"
+	"bytes"
 
 	"github.com/urnetwork/connect"
 )
 
-
 // a simple http/https proxy focused on proper file descriptor management
 
-
 type HttpProxy struct {
-	ProxyReadTimeout time.Duration
+	ProxyReadTimeout  time.Duration
 	ProxyWriteTimeout time.Duration
-	ProxyIdleTimeout time.Duration
+	ProxyIdleTimeout  time.Duration
 	// only used for http proxy
 	ProxyTlsHandshakeTimeout time.Duration
-	ConnectDialWithRequest func(r *http.Request, network string, addr string) (net.Conn, error)
-	GetTlsConfigForClient func(*tls.ClientHelloInfo) (*tls.Config, error)
+	MaxHttpBodyBytes         int64
+	ConnectDialWithRequest   func(r *http.Request, network string, addr string) (net.Conn, error)
+	GetTlsConfigForClient    func(*tls.ClientHelloInfo) (*tls.Config, error)
 }
 
 func NewHttpProxy() *HttpProxy {
-	return &HttpProxy{}
+	return &HttpProxy{
+		MaxHttpBodyBytes: 2 * 1024 * 1024,
+	}
 }
-
 
 func (self *HttpProxy) ListenAndServe(ctx context.Context, network string, addr string) error {
 
 	httpServer := &http.Server{
-		Addr:      addr,
-		Handler:   self,
-		ReadTimeout: self.ProxyReadTimeout,
+		Addr:         addr,
+		Handler:      self,
+		ReadTimeout:  self.ProxyReadTimeout,
 		WriteTimeout: self.ProxyWriteTimeout,
-		IdleTimeout: self.ProxyIdleTimeout,
+		IdleTimeout:  self.ProxyIdleTimeout,
 	}
-
 
 	listenConfig := net.ListenConfig{}
 
@@ -60,7 +60,6 @@ func (self *HttpProxy) ListenAndServe(ctx context.Context, network string, addr 
 	return httpServer.Serve(l)
 }
 
-
 func (self *HttpProxy) ListenAndServeTls(ctx context.Context, network string, addr string) error {
 
 	tlsConfig := &tls.Config{
@@ -68,14 +67,13 @@ func (self *HttpProxy) ListenAndServeTls(ctx context.Context, network string, ad
 	}
 
 	httpServer := &http.Server{
-		Addr:      addr,
-		Handler:   self,
-		TLSConfig: tlsConfig,
-		ReadTimeout: self.ProxyReadTimeout,
+		Addr:         addr,
+		Handler:      self,
+		TLSConfig:    tlsConfig,
+		ReadTimeout:  self.ProxyReadTimeout,
 		WriteTimeout: self.ProxyWriteTimeout,
-		IdleTimeout: self.ProxyIdleTimeout,
+		IdleTimeout:  self.ProxyIdleTimeout,
 	}
-
 
 	listenConfig := net.ListenConfig{}
 
@@ -92,7 +90,6 @@ func (self *HttpProxy) ListenAndServeTls(ctx context.Context, network string, ad
 	return httpServer.ServeTLS(l, "", "")
 }
 
-
 func (self *HttpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	connect.HandleError(func() {
 		if r.Method == http.MethodConnect {
@@ -103,9 +100,6 @@ func (self *HttpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-
-
-
 func (self *HttpProxy) handleHttps(w http.ResponseWriter, r *http.Request) {
 	hij := w.(http.Hijacker)
 
@@ -114,36 +108,37 @@ func (self *HttpProxy) handleHttps(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
-	defer conn.Close()
+	handleCtx, handleCancel := context.WithCancel(r.Context())
+	defer handleCancel()
+	go connect.HandleError(func() {
+		defer conn.Close()
+		select {
+		case <-handleCtx.Done():
+		}
+	})
 
 	// r.URL.Host contains both the host and port (if specified)
-	proxyConn, err := self.ConnectDialWithRequest(r, "tcp", r.URL.Host)
-	if err != nil {
-		httpError(conn, http.StatusBadGateway, err)
-		return
+	var proxyConn net.Conn
+	for {
+		select {
+		case <-handleCtx.Done():
+			httpError(conn, http.StatusBadGateway, err)
+			return
+		default:
+		}
+		proxyConn, err = self.ConnectDialWithRequest(r, "tcp", r.URL.Host)
+		if err == nil {
+			break
+		}
 	}
 	defer proxyConn.Close()
 
-	conn.Write([]byte("HTTP/1.0 200 Connection established\r\n\r\n"))
-
-	handleCtx, handleCancel := context.WithCancel(r.Context())
-	defer handleCancel()
-
-	go connect.HandleError(func() {
-		defer handleCancel()
-		copyBufferWithTimeout(proxyConn, conn, nil, self.ProxyReadTimeout, self.ProxyWriteTimeout)
-	})
-
-	go connect.HandleError(func() {
-		defer handleCancel()
-		copyBufferWithTimeout(conn, proxyConn, nil, self.ProxyReadTimeout, self.ProxyWriteTimeout)
-	})
-
-	select {
-	case <- handleCtx.Done():
+	_, err = conn.Write([]byte("HTTP/1.0 200 Connection established\r\n\r\n"))
+	if err != nil {
+		return
 	}
 
-	return
+	copyConn(handleCtx, handleCancel, conn, proxyConn, self.ProxyReadTimeout, self.ProxyWriteTimeout)
 }
 
 func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
@@ -151,38 +146,56 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 	// r.Header.Del("Proxy-Connection")
 	// r.Header.Del("Proxy-Authenticate")
 	// r.Header.Del("Proxy-Authorization")
-	
 
-	r2, err := http.NewRequestWithContext(
-		r.Context(),
-		r.Method,
-		r.URL.String(),
-		r.Body,
-	)
+	b := bytes.NewBuffer(nil)
+	_, err := copyBufferWithTimeout(b, io.LimitReader(r.Body, self.MaxHttpBodyBytes), nil, self.ProxyReadTimeout, self.ProxyWriteTimeout)
+	r.Body.Close()
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
+	bodyBytes := b.Bytes()
+
+	handleCtx, handleCancel := context.WithCancel(r.Context())
+	defer handleCancel()
 
 	tr := &http.Transport{
 		Dial: func(network string, addr string) (net.Conn, error) {
-			return connect.HandleError2(func()(net.Conn, error) {
+			return connect.HandleError2(func() (net.Conn, error) {
 				return self.ConnectDialWithRequest(r, network, addr)
-			}, func()(net.Conn, error) {
+			}, func() (net.Conn, error) {
 				return nil, fmt.Errorf("Unexpected error")
 			})
 		},
-		DisableKeepAlives: true,
-		TLSHandshakeTimeout: self.ProxyTlsHandshakeTimeout,
+		DisableKeepAlives:     true,
+		TLSHandshakeTimeout:   self.ProxyTlsHandshakeTimeout,
 		ResponseHeaderTimeout: self.ProxyReadTimeout,
 	}
 
-
-	response, err := tr.RoundTrip(r2)
-	if err != nil {
-		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-		return
+	var response *http.Response
+	for {
+		select {
+		case <-handleCtx.Done():
+			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+			return
+		default:
+		}
+		r2, err := http.NewRequestWithContext(
+			r.Context(),
+			r.Method,
+			r.URL.String(),
+			bytes.NewReader(bodyBytes),
+		)
+		if err != nil {
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		response, err = tr.RoundTrip(r2)
+		if err == nil {
+			break
+		}
 	}
+	defer response.Body.Close()
 
 	h := w.Header()
 	for k := range w.Header() {
@@ -201,29 +214,17 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
-		defer conn.Close()
+		go connect.HandleError(func() {
+			defer conn.Close()
+			select {
+			case <-handleCtx.Done():
+			}
+		})
 
 		proxyRw := response.Body.(io.ReadWriter)
-		defer response.Body.Close()
 
-		handleCtx, handleCancel := context.WithCancel(r.Context())
-
-		go connect.HandleError(func() {
-			defer handleCancel()
-			copyBufferWithTimeout(conn, proxyRw, nil, self.ProxyReadTimeout, self.ProxyWriteTimeout)
-		})
-
-		go connect.HandleError(func() {
-			defer handleCancel()
-			copyBufferWithTimeout(proxyRw, conn, nil, self.ProxyReadTimeout, self.ProxyWriteTimeout)
-		})
-
-		select {
-		case <- handleCtx.Done():
-		}
+		copyConn(handleCtx, handleCancel, conn, proxyRw, self.ProxyReadTimeout, self.ProxyWriteTimeout)
 	} else {
-		defer response.Body.Close()
-
 		var flush func()
 
 		chunked := false
@@ -256,7 +257,6 @@ func headerContains(h http.Header, name string, value string) bool {
 	return false
 }
 
-
 // for a hijacked connection
 func httpError(w io.Writer, statusCode int, err error) error {
 	errorMessage := err.Error()
@@ -270,4 +270,3 @@ func httpError(w io.Writer, statusCode int, err error) error {
 	_, writeErr := io.WriteString(w, errStr)
 	return writeErr
 }
-
