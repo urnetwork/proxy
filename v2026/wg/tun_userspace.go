@@ -19,11 +19,11 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/connect/protocol"
-	"github.com/urnetwork/userwireguard/conn"
-	"github.com/urnetwork/userwireguard/logger"
-	"github.com/urnetwork/userwireguard/tun"
+	"github.com/urnetwork/connect/v2026"
+	"github.com/urnetwork/connect/v2026/protocol"
+	"github.com/urnetwork/userwireguard/v2026/conn"
+	"github.com/urnetwork/userwireguard/v2026/logger"
+	"github.com/urnetwork/userwireguard/v2026/tun"
 )
 
 type NATKey struct {
