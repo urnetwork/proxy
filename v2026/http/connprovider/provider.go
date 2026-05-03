@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 type Provider struct {
