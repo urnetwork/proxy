@@ -16,7 +16,7 @@ require (
 	github.com/urnetwork/glog v0.0.0
 	github.com/urnetwork/userwireguard v0.0.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
-	gvisor.dev/gvisor v0.0.0-20260501215648-f395c7e409ad
+	gvisor.dev/gvisor v0.0.0-20260501174236-38fac1bddd3c
 )
 
 require (

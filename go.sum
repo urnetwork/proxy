@@ -186,6 +186,8 @@ gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8 h1:Zy8IV/+FMLxy6j6p87vk/vQG
 gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8/go.mod h1:QkHjoMIBaYtpVufgwv3keYAbln78mBoCuShZrPrer1Q=
 gvisor.dev/gvisor v0.0.0-20260227210555-d9691a1d6002 h1:QWimGtQowYbOWVLold16QwkcUPJe9prBFhEpOWfJbps=
 gvisor.dev/gvisor v0.0.0-20260227210555-d9691a1d6002/go.mod h1:QkHjoMIBaYtpVufgwv3keYAbln78mBoCuShZrPrer1Q=
+gvisor.dev/gvisor v0.0.0-20260501174236-38fac1bddd3c h1:nUZeBYQ1vntKyh+GQXRkAhIaGtool8cy/DfY27T34pg=
+gvisor.dev/gvisor v0.0.0-20260501174236-38fac1bddd3c/go.mod h1:xQ2PWgHmWJA/Ph4i1q1jBm39BKhc3W0DXqWoDSyuBOY=
 gvisor.dev/gvisor v0.0.0-20260501215648-f395c7e409ad h1:n6N0AmYZPUSYh8OnT6vo51C2s0Rw6N2lR/T4FhGtqao=
 gvisor.dev/gvisor v0.0.0-20260501215648-f395c7e409ad/go.mod h1:xQ2PWgHmWJA/Ph4i1q1jBm39BKhc3W0DXqWoDSyuBOY=
 src.agwa.name/tlshacks v0.0.2 h1:Dg1tW0UiAJZnJK/SXDF8u+sDRrly38iPa4YzCBJAqPI=
