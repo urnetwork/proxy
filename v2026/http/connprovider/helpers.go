@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 func LoginWithCredentials(ctx context.Context, apiURL, userAuth, password string) (string, error) {
