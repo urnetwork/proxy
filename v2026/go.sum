@@ -97,6 +97,12 @@ github.com/things-go/go-socks5 v0.1.1 h1:48hy9cHEXPKeG91G/g4n8zW4uynzPUQy/FkcrJ7
 github.com/things-go/go-socks5 v0.1.1/go.mod h1:1YBHVYG7Oli5ae+Pwkp630cPAwY1pjUPmohO1n0Emg0=
 github.com/urfave/cli/v2 v2.27.7 h1:bH59vdhbjLv3LAvIu6gd0usJHgoTTPhCFib8qqOwXYU=
 github.com/urfave/cli/v2 v2.27.7/go.mod h1:CyNAG/xg+iAOg0N4MPGZqVmv2rCoP267496AOXUZjA4=
+github.com/urnetwork/connect/v2026 v2026.5.9-935883780 h1:1niYmu/2rtFS8e/ho81EN4qalIcKasFLwWapMQKJzC4=
+github.com/urnetwork/connect/v2026 v2026.5.9-935883780/go.mod h1:Y5Wu6eA2G9/rdHuO9vt++oGElttBieKr+CYnHjdH81Y=
+github.com/urnetwork/glog/v2026 v2026.5.9-935883780 h1:b9zoMy2ZoFguWT+/bDLO+dAskW/EpgTajhiLGMEVxQk=
+github.com/urnetwork/glog/v2026 v2026.5.9-935883780/go.mod h1:X77XqzsL9XxcDl8+FlcXqssBOec+d0oGcHthz20+0MM=
+github.com/urnetwork/userwireguard/v2026 v2026.5.9-935883780 h1:+B8eGD5Ksb3+JEEm2R4cw/tJlzdwL/XPMvLAVkab4Ks=
+github.com/urnetwork/userwireguard/v2026 v2026.5.9-935883780/go.mod h1:adoAI2OkSbOcrRa+/XvZ3w5JvzstAztrcDSicycqhuQ=
 github.com/wlynxg/anet v0.0.5 h1:J3VJGi1gvo0JwZ/P1/Yc/8p63SoW98B5dHkYDmpgvvU=
 github.com/wlynxg/anet v0.0.5/go.mod h1:eay5PRQr7fIVAMbTbchTnO9gG65Hg/uYGdc7mguHxoA=
 github.com/xrash/smetrics v0.0.0-20250705151800-55b8f293f342 h1:FnBeRrxr7OU4VvAzt5X7s6266i6cSVkkFPS0TuXWbIg=

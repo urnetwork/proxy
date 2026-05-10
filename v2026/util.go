@@ -12,7 +12,7 @@ import (
 	// "fmt"
 	// "sync"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 func copyBufferWithTimeout(dst io.Writer, src io.Reader, buf []byte, readTimeout time.Duration, writeTimeout time.Duration) (written int64, err error) {
