@@ -166,6 +166,8 @@ func (self *WgProxy) ListenAndServe(ipv4 string, ipv6 string, port int) error {
 
 	select {
 	case <-self.device.Wait():
+	case <-self.ctx.Done():
+		self.device.Close()
 	}
 	return nil
 }

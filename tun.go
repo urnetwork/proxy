@@ -49,6 +49,8 @@ func DefaultTunSettings() *TunSettings {
 		DialRace:        4,
 		DialRaceTimeout: 2 * time.Second,
 		DialTimeout:     15 * time.Second,
+
+		WriteTimeout: 5 * time.Second,
 	}
 }
 
@@ -60,6 +62,8 @@ type TunSettings struct {
 	DialRace        int
 	DialRaceTimeout time.Duration
 	DialTimeout     time.Duration
+
+	WriteTimeout time.Duration
 }
 
 var tunStack = sync.OnceValue(func() *stack.Stack {
@@ -225,9 +229,9 @@ func (self *Tun) WriteNotify() {
 	case <-self.ctx.Done():
 		connect.MessagePoolReturn(packet)
 	case self.receivePacket <- packet:
-		// case <-time.After(DefaultWriteTimeout):
-		// 	// drop
-		// 	connect.MessagePoolReturn(packet)
+	case <-time.After(self.settings.WriteTimeout):
+		// drop
+		connect.MessagePoolReturn(packet)
 	}
 }
 
@@ -351,7 +355,7 @@ func (self *Tun) dialContext(ctx context.Context, network string, address string
 	switch network {
 	case "tcp", "tcp4", "tcp6":
 		fa, pn := self.convertToFullAddr(addrPort)
-		conn, err := gonet.DialTCP(self.stack, fa, pn)
+		conn, err := gonet.DialContextTCP(ctx, self.stack, fa, pn)
 		if err == nil {
 			glog.V(1).Infof("[tun]tcp connect (%s)->%s success\n", host, addrPort)
 			return conn, nil

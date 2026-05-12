@@ -193,7 +193,7 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-handleCtx.Done():
-			httpError(w, http.StatusBadGateway, err)
+			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		case <-reconnect.After():
 		}
