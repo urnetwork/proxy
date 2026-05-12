@@ -19,9 +19,10 @@ import (
 // a simple http/https proxy focused on proper file descriptor management
 
 type HttpProxy struct {
-	ProxyReadTimeout  time.Duration
-	ProxyWriteTimeout time.Duration
-	ProxyIdleTimeout  time.Duration
+	ProxyReadTimeout    time.Duration
+	ProxyWriteTimeout   time.Duration
+	ProxyIdleTimeout    time.Duration
+	ProxyConnectTimeout time.Duration
 	// only used for http proxy
 	ProxyTlsHandshakeTimeout time.Duration
 	MaxHttpBodyBytes         int64
@@ -120,15 +121,16 @@ func (self *HttpProxy) handleHttps(w http.ResponseWriter, r *http.Request) {
 	// r.URL.Host contains both the host and port (if specified)
 	var proxyConn net.Conn
 	for {
+		reconnect := connect.NewReconnect(self.ProxyConnectTimeout)
+		proxyConn, err = self.ConnectDialWithRequest(r, "tcp", r.URL.Host)
+		if err == nil {
+			break
+		}
 		select {
 		case <-handleCtx.Done():
 			httpError(conn, http.StatusBadGateway, err)
 			return
-		default:
-		}
-		proxyConn, err = self.ConnectDialWithRequest(r, "tcp", r.URL.Host)
-		if err == nil {
-			break
+		case <-reconnect.After():
 		}
 	}
 	defer proxyConn.Close()
@@ -174,12 +176,6 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 
 	var response *http.Response
 	for {
-		select {
-		case <-handleCtx.Done():
-			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-			return
-		default:
-		}
 		r2, err := http.NewRequestWithContext(
 			r.Context(),
 			r.Method,
@@ -190,9 +186,16 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
+		reconnect := connect.NewReconnect(self.ProxyConnectTimeout)
 		response, err = tr.RoundTrip(r2)
 		if err == nil {
 			break
+		}
+		select {
+		case <-handleCtx.Done():
+			httpError(w, http.StatusBadGateway, err)
+			return
+		case <-reconnect.After():
 		}
 	}
 	defer response.Body.Close()
