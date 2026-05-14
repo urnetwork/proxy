@@ -200,6 +200,14 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 	}
 	defer response.Body.Close()
 
+	isUpgrade := response.StatusCode == http.StatusSwitchingProtocols
+	proxyRw, isRw := response.Body.(io.ReadWriter)
+
+	if isUpgrade && !isRw {
+		http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		return
+	}
+
 	h := w.Header()
 	for k := range w.Header() {
 		h.Del(k)
@@ -209,12 +217,14 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(response.StatusCode)
 
-	if headerContains(response.Header, "connection", "upgrade") && headerContains(response.Header, "upgrade", "websocket") {
-		hij := w.(http.Hijacker)
+	if isUpgrade {
+		hij, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
 
 		conn, _, err := hij.Hijack()
 		if err != nil {
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
 		go connect.HandleError(func() {
@@ -223,8 +233,6 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 			case <-handleCtx.Done():
 			}
 		})
-
-		proxyRw := response.Body.(io.ReadWriter)
 
 		copyConn(handleCtx, handleCancel, conn, proxyRw, self.ProxyReadTimeout, self.ProxyWriteTimeout)
 	} else {
@@ -246,18 +254,6 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		}
 	}
-}
-
-func headerContains(h http.Header, name string, value string) bool {
-	value = strings.ToLower(value)
-	for _, v := range h.Values(name) {
-		for _, s := range strings.Split(strings.ToLower(v), ",") {
-			if value == s {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // for a hijacked connection
