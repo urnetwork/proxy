@@ -40,30 +40,34 @@ import (
 // const DefaultWriteTimeout = 15 * time.Second
 
 func DefaultTunSettings() *TunSettings {
+	return DefaultTunSettingsWithBufferSize(32)
+}
+
+func DefaultTunSettingsWithBufferSize(bufferSize int) *TunSettings {
 	return &TunSettings{
-		ChannelSize:       64,
-		ProxySequenceSize: 256,
-		Mtu:               1440,
+		ChannelSize: bufferSize,
+		Mtu:         1440,
 
 		DialRace:        4,
 		DialRaceTimeout: 2 * time.Second,
-		DialTimeout:     15 * time.Second,
+		DialTimeout:     30 * time.Second,
 
-		// Do not drop packets
-		WriteTimeout: -1,
+		// this works with `ProxySequenceSize` to control packet loss during back pressure
+		WriteTimeout:      5 * time.Second,
+		ProxySequenceSize: bufferSize,
 	}
 }
 
 type TunSettings struct {
-	ChannelSize       int
-	ProxySequenceSize int
-	Mtu               int
+	ChannelSize int
+	Mtu         int
 
 	DialRace        int
 	DialRaceTimeout time.Duration
 	DialTimeout     time.Duration
 
-	WriteTimeout time.Duration
+	WriteTimeout      time.Duration
+	ProxySequenceSize int
 }
 
 var tunStack = sync.OnceValue(func() *stack.Stack {
