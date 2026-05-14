@@ -6,11 +6,11 @@ import (
 	// "net/http"
 	"io"
 	// "os"
+	"sync"
 	"time"
 	// "strings"
 	"errors"
 	// "fmt"
-	// "sync"
 
 	"github.com/urnetwork/connect"
 )
@@ -85,83 +85,50 @@ func copyConn(ctx context.Context, cancel context.CancelFunc, conn io.ReadWriter
 }
 
 func copyRw(ctx context.Context, cancel context.CancelFunc, connReader io.Reader, connWriter io.Writer, proxyConnReader io.Reader, proxyConnWriter io.Writer, readTimeout time.Duration, writeTimeout time.Duration) error {
-	// errs := make(chan error)
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
 
-	// var wg sync.WaitGroup
-
-	// wg.Add(1)
-	// go connect.HandleError(func() {
-	// 	defer wg.Done()
-	// 	defer cancel()
-	// 	_, err := copyBufferWithTimeout(proxyConnWriter, connReader, nil, readTimeout, writeTimeout)
-	// 	select {
-	// 	case <- ctx.Done():
-	// 	case errs <- err:
-	// 	}
-	// })
-
-	// wg.Add(1)
-	// go connect.HandleError(func() {
-	// 	defer wg.Done()
-	// 	defer cancel()
-
-	// 	buf := connect.MessagePoolGet(2048)
-	// 	defer connect.MessagePoolReturn(buf)
-
-	// 	n := int((readTimeout + flushTimeout - 1) / flushTimeout)
-	// 	for c := 0; c < n; {
-	// 		n, err := copyBufferWithTimeout(connWriter, proxyConnReader, buf, flushTimeout, writeTimeout)
-	// 		if err == nil || !errors.Is(err, os.ErrDeadlineExceeded) {
-	// 			select {
-	// 			case <- ctx.Done():
-	// 			case errs <- err:
-	// 			}
-	// 		}
-	// 		if 0 < n {
-	// 			c = 0
-	// 		} else {
-	// 			select {
-	// 			case <- ctx.Done():
-	// 				return
-	// 			default:
-	// 				c += 1
-	// 			}
-	// 		}
-	// 	}
-	// })
-
-	// select {
-	// case <- ctx.Done():
-	// 	return nil
-	// case err := <- errs:
-	// 	wg.Wait()
-	// 	return err
-	// }
-
-	errs := make(chan error)
-
+	wg.Add(1)
 	go connect.HandleError(func() {
+		defer wg.Done()
 		defer cancel()
 		_, err := copyBufferWithTimeout(proxyConnWriter, connReader, nil, readTimeout, writeTimeout)
-		select {
-		case <-ctx.Done():
-		case errs <- err:
-		}
+		errs <- err
 	})
 
+	wg.Add(1)
 	go connect.HandleError(func() {
+		defer wg.Done()
 		defer cancel()
 		_, err := copyBufferWithTimeout(connWriter, proxyConnReader, nil, readTimeout, writeTimeout)
+		errs <- err
+	})
+
+	// When ctx is canceled (either because one direction finished or because the
+	// caller canceled), force the readers' deadlines to expire immediately so
+	// the remaining copyBufferWithTimeout call returns instead of blocking on a
+	// long readTimeout.
+	done := make(chan struct{})
+	defer close(done)
+	go connect.HandleError(func() {
 		select {
 		case <-ctx.Done():
-		case errs <- err:
+			if c, ok := connReader.(interface{ SetReadDeadline(time.Time) error }); ok {
+				c.SetReadDeadline(time.Now())
+			}
+			if c, ok := proxyConnReader.(interface{ SetReadDeadline(time.Time) error }); ok {
+				c.SetReadDeadline(time.Now())
+			}
+		case <-done:
 		}
 	})
 
+	wg.Wait()
+
 	select {
-	case <-ctx.Done():
-		return nil
 	case err := <-errs:
 		return err
+	default:
+		return nil
 	}
 }

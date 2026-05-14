@@ -42,6 +42,7 @@ type WgTun interface {
 	CancelIfIdle() bool
 	Send([]byte) bool
 	SetReceive(chan []byte)
+	Close() error
 }
 
 func DefaultWgProxySettings() *WgProxySettings {
@@ -198,8 +199,12 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 		if client, ok := self.clients[addr]; ok {
 			tun, err := client.Tun()
 			if err == nil {
-				tun.SetReceive(self.receive)
-				self.activeClients[addr] = tun
+				if tun != activeTun {
+					activeTun.SetReceive(nil)
+					activeTun.Close()
+					tun.SetReceive(self.receive)
+					self.activeClients[addr] = tun
+				}
 			} else {
 				activeTun.SetReceive(nil)
 				delete(self.activeClients, addr)
@@ -334,7 +339,7 @@ func (self *WgProxy) Read(bufs [][]byte, sizes []int, offset int) (count int, re
 	case packet := <-self.receive:
 		defer connect.MessagePoolReturn(packet)
 		n := copy(bufs[0][offset:], packet)
-		if len(packet) < n {
+		if n < len(packet) {
 			returnErr = errors.Join(returnErr, PacketTooLargeError)
 		}
 		sizes[0] = n
@@ -346,6 +351,16 @@ func (self *WgProxy) Read(bufs [][]byte, sizes []int, offset int) (count int, re
 // `uwgtun.Device` implementation
 func (self *WgProxy) Close() error {
 	self.device.Close()
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		for _, activeTun := range self.activeClients {
+			activeTun.SetReceive(nil)
+			activeTun.Close()
+		}
+		clear(self.activeClients)
+	}()
 	return nil
 }
 

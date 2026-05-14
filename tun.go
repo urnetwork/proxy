@@ -12,7 +12,6 @@ import (
 	mathrand "math/rand"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -43,14 +42,15 @@ import (
 func DefaultTunSettings() *TunSettings {
 	return &TunSettings{
 		ChannelSize:       64,
-		ProxySequenceSize: 64,
+		ProxySequenceSize: 256,
 		Mtu:               1440,
 
 		DialRace:        4,
 		DialRaceTimeout: 2 * time.Second,
 		DialTimeout:     15 * time.Second,
 
-		WriteTimeout: 5 * time.Second,
+		// Do not drop packets
+		WriteTimeout: -1,
 	}
 }
 
@@ -76,12 +76,80 @@ var tunStack = sync.OnceValue(func() *stack.Stack {
 
 })
 
-// FIXME this should be a pool where closed nic ids and addrs can be reused
-var nicIdCounter atomic.Uint32
-var localIpv4AddressGenerator = sync.OnceValue(func() *connect.AddrGenerator {
-	prefix := netip.MustParsePrefix("169.254.0.0/16")
-	return connect.NewAddrGenerator(prefix)
-})
+type NicIdAllocator struct {
+	stateLock   sync.Mutex
+	counter     uint32
+	freeList    []tcpip.NICID
+	maxFreeList int
+}
+
+func NewNicIdAllocator(maxFreeList int) *NicIdAllocator {
+	return &NicIdAllocator{
+		maxFreeList: maxFreeList,
+	}
+}
+
+func (self *NicIdAllocator) TakeNicId() tcpip.NICID {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if n := len(self.freeList); n > 0 {
+		id := self.freeList[n-1]
+		self.freeList = self.freeList[:n-1]
+		return id
+	}
+	self.counter += 1
+	return tcpip.NICID(self.counter)
+}
+
+func (self *NicIdAllocator) ReturnNicId(id tcpip.NICID) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if len(self.freeList) >= self.maxFreeList {
+		return
+	}
+	self.freeList = append(self.freeList, id)
+}
+
+var defaultNicIdAllocator = NewNicIdAllocator(128)
+
+type LocalIpv4AddressAllocator struct {
+	stateLock   sync.Mutex
+	generator   *connect.AddrGenerator
+	freeList    []netip.Addr
+	maxFreeList int
+}
+
+func NewLocalIpv4AddressAllocator(prefix netip.Prefix, maxFreeList int) *LocalIpv4AddressAllocator {
+	return &LocalIpv4AddressAllocator{
+		generator:   connect.NewAddrGenerator(prefix),
+		maxFreeList: maxFreeList,
+	}
+}
+
+func (self *LocalIpv4AddressAllocator) TakeAddr() (netip.Addr, bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if n := len(self.freeList); n > 0 {
+		addr := self.freeList[n-1]
+		self.freeList = self.freeList[:n-1]
+		return addr, true
+	}
+	return self.generator.Next()
+}
+
+func (self *LocalIpv4AddressAllocator) ReturnAddr(addr netip.Addr) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if len(self.freeList) >= self.maxFreeList {
+		return
+	}
+	self.freeList = append(self.freeList, addr)
+}
+
+var defaultLocalIpv4AddressAllocator = NewLocalIpv4AddressAllocator(
+	netip.MustParsePrefix("169.254.0.0/16"),
+	128,
+)
 
 type Tun struct {
 	ctx    context.Context
@@ -89,10 +157,13 @@ type Tun struct {
 
 	settings *TunSettings
 
-	ep            *channel.Endpoint
-	stack         *stack.Stack
-	nicId         tcpip.NICID
-	receivePacket chan []byte
+	ep                        *channel.Endpoint
+	stack                     *stack.Stack
+	nicId                     tcpip.NICID
+	nicIdAllocator            *NicIdAllocator
+	localAddresses            []netip.Addr
+	localIpv4AddressAllocator *LocalIpv4AddressAllocator
+	receivePacket             chan []byte
 	// mtu                 int
 	// registeredAddresses map[netip.Addr]bool
 	dohResolver *connect.DohCache
@@ -111,12 +182,16 @@ func CreateTun(ctx context.Context, settings *TunSettings) (*Tun, error) {
 func CreateTunWithResolver(ctx context.Context, settings *TunSettings, dnsResolverSettings *connect.DnsResolverSettings) (*Tun, error) {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
-	nicId := tcpip.NICID(nicIdCounter.Add(1))
+	nicIdAllocator := defaultNicIdAllocator
+	localIpv4AddressAllocator := defaultLocalIpv4AddressAllocator
 
-	localIpv4Address, ok := localIpv4AddressGenerator().Next()
+	localIpv4Address, ok := localIpv4AddressAllocator.TakeAddr()
 	if !ok {
+		cancel()
 		return nil, fmt.Errorf("No more local addresses")
 	}
+
+	nicId := nicIdAllocator.TakeNicId()
 
 	localAddresses := []netip.Addr{
 		localIpv4Address,
@@ -124,14 +199,28 @@ func CreateTunWithResolver(ctx context.Context, settings *TunSettings, dnsResolv
 
 	ep := channel.New(settings.ChannelSize, uint32(settings.Mtu), tcpip.LinkAddress(fmt.Sprintf("%x", nicId)))
 
+	releaseOnError := func() {
+		ep.Close()
+		nicIdAllocator.ReturnNicId(nicId)
+		for _, addr := range localAddresses {
+			if addr.Is4() {
+				localIpv4AddressAllocator.ReturnAddr(addr)
+			}
+		}
+		cancel()
+	}
+
 	tun := &Tun{
-		ctx:           cancelCtx,
-		cancel:        cancel,
-		settings:      settings,
-		ep:            ep,
-		stack:         tunStack(),
-		nicId:         nicId,
-		receivePacket: make(chan []byte, settings.ProxySequenceSize),
+		ctx:                       cancelCtx,
+		cancel:                    cancel,
+		settings:                  settings,
+		ep:                        ep,
+		stack:                     tunStack(),
+		nicId:                     nicId,
+		nicIdAllocator:            nicIdAllocator,
+		localAddresses:            localAddresses,
+		localIpv4AddressAllocator: localIpv4AddressAllocator,
+		receivePacket:             make(chan []byte, settings.ProxySequenceSize),
 	}
 
 	dohSettings := connect.DefaultDohSettings()
@@ -147,6 +236,7 @@ func CreateTunWithResolver(ctx context.Context, settings *TunSettings, dnsResolv
 	tun.dohResolver = connect.NewDohCache(dohSettings)
 
 	if tcpipErr := tun.stack.CreateNIC(nicId, ep); tcpipErr != nil {
+		releaseOnError()
 		return nil, fmt.Errorf("Could not create nic err=%s", tcpipErr)
 	}
 
@@ -163,6 +253,8 @@ func CreateTunWithResolver(ctx context.Context, settings *TunSettings, dnsResolv
 		}
 
 		if tcpipErr := tun.stack.AddProtocolAddress(nicId, protoAddr, stack.AddressProperties{}); tcpipErr != nil {
+			tun.stack.RemoveNIC(nicId)
+			releaseOnError()
 			return nil, fmt.Errorf("Could not create add nic address err=%s", tcpipErr)
 		}
 	}
@@ -225,13 +317,21 @@ func (self *Tun) WriteNotify() {
 	packet := connect.MessagePoolCopy(view.AsSlice())
 	pkt.DecRef()
 
-	select {
-	case <-self.ctx.Done():
-		connect.MessagePoolReturn(packet)
-	case self.receivePacket <- packet:
-	case <-time.After(self.settings.WriteTimeout):
-		// drop
-		connect.MessagePoolReturn(packet)
+	if 0 < self.settings.WriteTimeout {
+		select {
+		case <-self.ctx.Done():
+			connect.MessagePoolReturn(packet)
+		case self.receivePacket <- packet:
+		case <-time.After(self.settings.WriteTimeout):
+			// drop
+			connect.MessagePoolReturn(packet)
+		}
+	} else {
+		select {
+		case <-self.ctx.Done():
+			connect.MessagePoolReturn(packet)
+		case self.receivePacket <- packet:
+		}
 	}
 }
 
@@ -295,6 +395,7 @@ func (self *Tun) DialContext(ctx context.Context, network string, address string
 			if err == nil {
 				select {
 				case <-raceCtx.Done():
+					conn.Close()
 				case raceOut <- conn:
 				}
 			}
@@ -387,5 +488,22 @@ func (self *Tun) Close() error {
 	self.cancel()
 	self.stack.RemoveNIC(self.nicId)
 	self.ep.Close()
+	// Drain any queued packets so their pool buffers can be returned. Any
+	// in-flight WriteNotify will see ctx.Done() and return its own packet.
+drain:
+	for {
+		select {
+		case packet := <-self.receivePacket:
+			connect.MessagePoolReturn(packet)
+		default:
+			break drain
+		}
+	}
+	self.nicIdAllocator.ReturnNicId(self.nicId)
+	for _, addr := range self.localAddresses {
+		if addr.Is4() {
+			self.localIpv4AddressAllocator.ReturnAddr(addr)
+		}
+	}
 	return nil
 }

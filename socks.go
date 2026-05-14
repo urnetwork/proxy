@@ -4,6 +4,7 @@ import (
 	"context"
 	// "crypto/tls"
 	// "encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	// "net/http"
@@ -11,7 +12,7 @@ import (
 	// "os"
 	"io"
 	"strings"
-	// "syscall"
+	"syscall"
 	"time"
 	// "sync"
 
@@ -85,13 +86,7 @@ func (self *SocksProxy) ListenAndServe(ctx context.Context, network string, addr
 func (self *SocksProxy) connectHandle(ctx context.Context, writer io.Writer, r SocksRequest) error {
 	proxyConn, err := self.ConnectDialWithRequest(ctx, r, "tcp", r.DestAddr.String())
 	if err != nil {
-		msg := err.Error()
-		resp := statute.RepHostUnreachable
-		if strings.Contains(msg, "refused") {
-			resp = statute.RepConnectionRefused
-		} else if strings.Contains(msg, "network is unreachable") {
-			resp = statute.RepNetworkUnreachable
-		}
+		resp := mapDialErrorToSocksReply(err)
 		socks5.SendReply(writer, resp, nil)
 		return err
 	}
@@ -129,4 +124,25 @@ func (self *SocksProxy) Valid(username string, password string, userAddr string)
 func (self *SocksProxy) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
 	// names are not resolved locally
 	return ctx, net.ParseIP("0.0.0.0").To4(), nil
+}
+
+func mapDialErrorToSocksReply(err error) uint8 {
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return statute.RepConnectionRefused
+	case errors.Is(err, syscall.ENETUNREACH):
+		return statute.RepNetworkUnreachable
+	case errors.Is(err, syscall.EHOSTUNREACH):
+		return statute.RepHostUnreachable
+	}
+	// Fallback to substring matching for errors not wrapped as syscall codes
+	// (e.g. gVisor tcpip errors surfaced through gonet).
+	msg := err.Error()
+	if strings.Contains(msg, "refused") {
+		return statute.RepConnectionRefused
+	}
+	if strings.Contains(msg, "network is unreachable") {
+		return statute.RepNetworkUnreachable
+	}
+	return statute.RepHostUnreachable
 }
