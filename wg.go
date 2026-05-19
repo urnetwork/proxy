@@ -138,6 +138,8 @@ func (self *WgProxy) run() {
 }
 
 func (self *WgProxy) ListenAndServe(ipv4 string, ipv6 string, port int) error {
+	defer self.cancel()
+
 	privateKey, err := wgtypes.ParseKey(self.settings.PrivateKey)
 	if err != nil {
 		return err
@@ -207,11 +209,13 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 				}
 			} else {
 				activeTun.SetReceive(nil)
+				activeTun.Close()
 				delete(self.activeClients, addr)
 				returnErr = errors.Join(returnErr, err)
 			}
 		} else {
 			activeTun.SetReceive(nil)
+			activeTun.Close()
 			delete(self.activeClients, addr)
 		}
 	}
@@ -332,12 +336,13 @@ func (self *WgProxy) Write(bufs [][]byte, offset int) (count int, returnErr erro
 }
 
 // `uwgtun.Device` implementation
+// note that `userwireguard` does not use `connect.MessagPool*`
 func (self *WgProxy) Read(bufs [][]byte, sizes []int, offset int) (count int, returnErr error) {
 	select {
 	case <-self.ctx.Done():
 		return 0, fmt.Errorf("Done.")
 	case packet := <-self.receive:
-		defer connect.MessagePoolReturn(packet)
+		// defer connect.MessagePoolReturn(packet)
 		n := copy(bufs[0][offset:], packet)
 		if n < len(packet) {
 			returnErr = errors.Join(returnErr, PacketTooLargeError)
@@ -350,6 +355,7 @@ func (self *WgProxy) Read(bufs [][]byte, sizes []int, offset int) (count int, re
 
 // `uwgtun.Device` implementation
 func (self *WgProxy) Close() error {
+	self.cancel()
 	self.device.Close()
 	func() {
 		self.stateLock.Lock()

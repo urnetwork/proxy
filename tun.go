@@ -460,7 +460,7 @@ func (self *Tun) dialContext(ctx context.Context, network string, address string
 	switch network {
 	case "tcp", "tcp4", "tcp6":
 		fa, pn := self.convertToFullAddr(addrPort)
-		conn, err := gonet.DialContextTCP(ctx, self.stack, fa, pn)
+		conn, err := gonet.DialContextTCP(dialCtx, self.stack, fa, pn)
 		if err == nil {
 			glog.V(1).Infof("[tun]tcp connect (%s)->%s success\n", host, addrPort)
 			return conn, nil

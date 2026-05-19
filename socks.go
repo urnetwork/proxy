@@ -70,7 +70,16 @@ func (self *SocksProxy) ListenAndServe(ctx context.Context, network string, addr
 	if err != nil {
 		return err
 	}
-	defer l.Close()
+
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	go connect.HandleError(func() {
+		defer l.Close()
+		select {
+		case <-runCtx.Done():
+		}
+	})
 
 	for {
 		conn, err := l.Accept()

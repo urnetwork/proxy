@@ -3,13 +3,12 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
 	"time"
-	// "errors"
-	"fmt"
 	// "sync"
 	"bytes"
 
@@ -56,7 +55,17 @@ func (self *HttpProxy) ListenAndServe(ctx context.Context, network string, addr 
 	if err != nil {
 		return err
 	}
-	defer l.Close()
+
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	go connect.HandleError(func() {
+		defer l.Close()
+		defer httpServer.Close()
+		select {
+		case <-runCtx.Done():
+		}
+	})
 
 	return httpServer.Serve(l)
 }
@@ -86,7 +95,17 @@ func (self *HttpProxy) ListenAndServeTls(ctx context.Context, network string, ad
 	if err != nil {
 		return err
 	}
-	defer l.Close()
+
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	go connect.HandleError(func() {
+		defer l.Close()
+		defer httpServer.Close()
+		select {
+		case <-runCtx.Done():
+		}
+	})
 
 	return httpServer.ServeTLS(l, "", "")
 }
