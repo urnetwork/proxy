@@ -12,7 +12,7 @@ import (
 	// "sync"
 	"bytes"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 // a simple http/https proxy focused on proper file descriptor management
