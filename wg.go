@@ -80,6 +80,41 @@ type WgProxy struct {
 
 	clients       map[netip.Addr]*WgClient
 	activeClients map[netip.Addr]WgTun
+
+	closeActiveClientsOnce sync.Once
+}
+
+type wgTunDevice struct {
+	proxy *WgProxy
+}
+
+func (self *wgTunDevice) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+	return self.proxy.Read(bufs, sizes, offset)
+}
+
+func (self *wgTunDevice) Write(bufs [][]byte, offset int) (int, error) {
+	return self.proxy.Write(bufs, offset)
+}
+
+func (self *wgTunDevice) MTU() int {
+	return self.proxy.MTU()
+}
+
+func (self *wgTunDevice) Events() <-chan uwgtun.Event {
+	return self.proxy.Events()
+}
+
+func (self *wgTunDevice) AddEvent(event uwgtun.Event) {
+	self.proxy.AddEvent(event)
+}
+
+func (self *wgTunDevice) Close() error {
+	self.proxy.cancel()
+	return nil
+}
+
+func (self *wgTunDevice) BatchSize() int {
+	return self.proxy.BatchSize()
 }
 
 func NewWgProxyWithDefaults(ctx context.Context) *WgProxy {
@@ -107,7 +142,7 @@ func NewWgProxy(ctx context.Context, settings *WgProxySettings) *WgProxy {
 			glog.Errorf("[wg]"+format, args...)
 		},
 	}
-	wg.device = device.NewDevice(wg, conn.NewDefaultBind(), logger)
+	wg.device = device.NewDevice(&wgTunDevice{proxy: wg}, conn.NewDefaultBind(), logger)
 
 	go connect.HandleError(wg.run)
 
@@ -115,6 +150,7 @@ func NewWgProxy(ctx context.Context, settings *WgProxySettings) *WgProxy {
 }
 
 func (self *WgProxy) run() {
+	defer self.closeActiveClients()
 	defer self.cancel()
 	for {
 		func() {
@@ -181,7 +217,10 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	peers := createPeerConfigs(clients)
+	peers, err := createPeerConfigs(clients)
+	if err != nil {
+		return err
+	}
 
 	config := wgtypes.Config{
 		ReplacePeers: true,
@@ -238,7 +277,10 @@ func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (returnErr err
 		return
 	}
 
-	peers := createPeerConfigs(newClients)
+	peers, err := createPeerConfigs(newClients)
+	if err != nil {
+		return err
+	}
 
 	config := wgtypes.Config{
 		ReplacePeers: false,
@@ -357,7 +399,12 @@ func (self *WgProxy) Read(bufs [][]byte, sizes []int, offset int) (count int, re
 func (self *WgProxy) Close() error {
 	self.cancel()
 	self.device.Close()
-	func() {
+	self.closeActiveClients()
+	return nil
+}
+
+func (self *WgProxy) closeActiveClients() {
+	self.closeActiveClientsOnce.Do(func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 
@@ -366,40 +413,51 @@ func (self *WgProxy) Close() error {
 			activeTun.Close()
 		}
 		clear(self.activeClients)
-	}()
-	return nil
+	})
 }
 
-func createPeerConfigs(clients map[netip.Addr]*WgClient) []wgtypes.PeerConfig {
-	var peerConfigs []wgtypes.PeerConfig
-	for _, client := range clients {
-		publicKey, err := wgtypes.ParseKey(client.PublicKey)
-		if err == nil {
-			var presharedKey *wgtypes.Key
-			if client.PresharedKey != "" {
-				var presharedKey_ wgtypes.Key
-				presharedKey_, err = wgtypes.ParseKey(client.PresharedKey)
-				if err == nil {
-					presharedKey = &presharedKey_
-				}
-			}
-			if err == nil {
-				peerConfig := wgtypes.PeerConfig{
-					PublicKey:         publicKey,
-					PresharedKey:      presharedKey,
-					ReplaceAllowedIPs: true,
-					AllowedIPs: []net.IPNet{
-						{
-							IP:   net.IP(client.ClientIpv4.AsSlice()),
-							Mask: net.CIDRMask(32, 32),
-						},
-					},
-				}
-				peerConfigs = append(peerConfigs, peerConfig)
-			}
+func createPeerConfigs(clients map[netip.Addr]*WgClient) ([]wgtypes.PeerConfig, error) {
+	peerConfigs := make([]wgtypes.PeerConfig, 0, len(clients))
+	for addr, client := range clients {
+		if client == nil {
+			return nil, fmt.Errorf("nil client for %s", addr)
 		}
+		if client.Tun == nil {
+			return nil, fmt.Errorf("nil tun factory for %s", addr)
+		}
+		if !client.ClientIpv4.Is4() {
+			return nil, fmt.Errorf("client %s has invalid ipv4 %s", addr, client.ClientIpv4)
+		}
+		if addr != client.ClientIpv4 {
+			return nil, fmt.Errorf("client map key %s does not match client ipv4 %s", addr, client.ClientIpv4)
+		}
+
+		publicKey, err := wgtypes.ParseKey(client.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("parse public key for %s: %w", addr, err)
+		}
+		var presharedKey *wgtypes.Key
+		if client.PresharedKey != "" {
+			presharedKey_, err := wgtypes.ParseKey(client.PresharedKey)
+			if err != nil {
+				return nil, fmt.Errorf("parse preshared key for %s: %w", addr, err)
+			}
+			presharedKey = &presharedKey_
+		}
+		peerConfig := wgtypes.PeerConfig{
+			PublicKey:         publicKey,
+			PresharedKey:      presharedKey,
+			ReplaceAllowedIPs: true,
+			AllowedIPs: []net.IPNet{
+				{
+					IP:   net.IP(client.ClientIpv4.AsSlice()),
+					Mask: net.CIDRMask(32, 32),
+				},
+			},
+		}
+		peerConfigs = append(peerConfigs, peerConfig)
 	}
-	return peerConfigs
+	return peerConfigs, nil
 }
 
 func WgGenKeyPair() (privateKey wgtypes.Key, publicKey wgtypes.Key, err error) {
