@@ -1,6 +1,6 @@
 **/build
 **/.DS_Store
-
+profile
 proxy.test
 wg/wg
 socks/socks
