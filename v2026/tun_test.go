@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 func TestTunTCPBridge(t *testing.T) {
