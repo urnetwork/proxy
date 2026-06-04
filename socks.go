@@ -93,6 +93,7 @@ func (self *SocksProxy) ListenAndServe(ctx context.Context, network string, addr
 }
 
 func (self *SocksProxy) connectHandle(ctx context.Context, writer io.Writer, r SocksRequest) error {
+	clientConn, _ := writer.(net.Conn)
 	proxyConn, err := self.ConnectDialWithRequest(ctx, r, "tcp", r.DestAddr.String())
 	if err != nil {
 		resp := mapDialErrorToSocksReply(err)
@@ -103,6 +104,9 @@ func (self *SocksProxy) connectHandle(ctx context.Context, writer io.Writer, r S
 	defer handleCancel()
 	go connect.HandleError(func() {
 		defer proxyConn.Close()
+		if clientConn != nil {
+			defer clientConn.Close()
+		}
 		select {
 		case <-handleCtx.Done():
 		}
@@ -131,8 +135,9 @@ func (self *SocksProxy) Valid(username string, password string, userAddr string)
 
 // socks.NameResolver
 func (self *SocksProxy) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
-	// names are not resolved locally
-	return ctx, net.ParseIP("0.0.0.0").To4(), nil
+	// Names are resolved by the proxied dialer. Returning nil preserves the FQDN
+	// in the request address instead of replacing it with a local resolver result.
+	return ctx, nil, nil
 }
 
 func mapDialErrorToSocksReply(err error) uint8 {

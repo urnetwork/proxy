@@ -5,11 +5,8 @@ for d in `find . -iname '*_test.go' | xargs -n 1 dirname | sort | uniq | paste -
         pushd $d
         # highlight source files in this dir
         match="/$(basename $(pwd))/\\S*\.go\|^\\S*_test.go"
-        export WARP_ENV="local"
-        export BRINGYOUR_POSTGRES_HOSTNAME="local-pg.bringyour.com"
-        export BRINGYOUR_REDIS_HOSTNAME="local-redis.bringyour.com"
-        # go test -v "$@" | grep --color=always -e "^" -e "$match"
         GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 0 -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --color=always -e "^" -e "$match"
+        # -trace profile/trace -coverprofile profile/cover 
         if [[ ${pipestatus[1]} != 0 ]]; then
             exit ${pipestatus[1]}
         fi
@@ -18,5 +15,11 @@ for d in `find . -iname '*_test.go' | xargs -n 1 dirname | sort | uniq | paste -
 done
 # stdbuf -i0 -o0 -e0 
 
-# ./test.sh -run 'pattern'
-# ./test.sh -short
+# to turn on logging e.g.
+# go test -args -v 2 -logtostderr true
+
+# go tool trace profile/trace
+# PPROF_BINARY_PATH=. go tool pprof profile/cpu
+
+# store default.pgo
+# https://go.dev/doc/pgo

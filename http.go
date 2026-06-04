@@ -169,10 +169,20 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 	// r.Header.Del("Proxy-Authorization")
 
 	b := bytes.NewBuffer(nil)
-	_, err := copyBufferWithTimeout(b, io.LimitReader(r.Body, self.MaxHttpBodyBytes), nil, self.ProxyReadTimeout, self.ProxyWriteTimeout)
-	r.Body.Close()
+	bodyReader := io.Reader(r.Body)
+	if 0 < self.MaxHttpBodyBytes {
+		bodyReader = io.LimitReader(r.Body, self.MaxHttpBodyBytes+1)
+	}
+	_, err := copyBufferWithTimeout(b, bodyReader, nil, self.ProxyReadTimeout, self.ProxyWriteTimeout)
+	if closeErr := r.Body.Close(); err == nil {
+		err = closeErr
+	}
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	if 0 < self.MaxHttpBodyBytes && self.MaxHttpBodyBytes < int64(b.Len()) {
+		http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
 		return
 	}
 	bodyBytes := b.Bytes()
@@ -195,16 +205,7 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 
 	var response *http.Response
 	for {
-		r2, err := http.NewRequestWithContext(
-			r.Context(),
-			r.Method,
-			r.URL.String(),
-			bytes.NewReader(bodyBytes),
-		)
-		if err != nil {
-			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-			return
-		}
+		r2 := cloneProxyRequest(handleCtx, r, bodyBytes)
 		reconnect := connect.NewReconnect(self.ProxyConnectTimeout)
 		response, err = tr.RoundTrip(r2)
 		if err == nil {
@@ -265,14 +266,42 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 			chunked = true
 		}
 		if chunked {
-			f := w.(http.Flusher)
-			flush = f.Flush
+			if f, ok := w.(http.Flusher); ok {
+				flush = f.Flush
+			}
 		}
 		_, err := copyBufferWithTimeoutAndFlush(w, response.Body, nil, self.ProxyReadTimeout, self.ProxyWriteTimeout, flush)
 		if err != nil {
 			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 		}
 	}
+}
+
+func cloneProxyRequest(ctx context.Context, r *http.Request, bodyBytes []byte) *http.Request {
+	r2 := r.Clone(ctx)
+	r2.RequestURI = ""
+	r2.Header = r.Header.Clone()
+	removeProxyRequestHeaders(r2.Header)
+	if len(bodyBytes) == 0 {
+		r2.Body = http.NoBody
+		r2.GetBody = func() (io.ReadCloser, error) {
+			return http.NoBody, nil
+		}
+		r2.ContentLength = 0
+	} else {
+		r2.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		r2.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+		}
+		r2.ContentLength = int64(len(bodyBytes))
+	}
+	return r2
+}
+
+func removeProxyRequestHeaders(h http.Header) {
+	h.Del("Proxy-Authenticate")
+	h.Del("Proxy-Authorization")
+	h.Del("Proxy-Connection")
 }
 
 // for a hijacked connection
