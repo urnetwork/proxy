@@ -217,9 +217,11 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
+	// createPeerConfigs is best-effort: invalid clients are skipped and reported
+	// here, but the valid peers are still applied.
 	peers, err := createPeerConfigs(clients)
 	if err != nil {
-		return err
+		glog.Errorf("[wg]SetClients: %s\n", err)
 	}
 
 	config := wgtypes.Config{
@@ -277,9 +279,11 @@ func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (returnErr err
 		return
 	}
 
+	// createPeerConfigs is best-effort: invalid clients are skipped and reported
+	// here, but the valid peers are still applied.
 	peers, err := createPeerConfigs(newClients)
 	if err != nil {
-		return err
+		glog.Errorf("[wg]AddClients: %s\n", err)
 	}
 
 	config := wgtypes.Config{
@@ -416,48 +420,62 @@ func (self *WgProxy) closeActiveClients() {
 	})
 }
 
+// createPeerConfigs converts clients into wg peer configs on a best-effort
+// basis. Invalid clients are skipped and their errors are joined into the
+// returned error. The returned configs and error are independent: a non-nil
+// error may accompany a non-empty slice. Callers should log the error and
+// continue applying the peer configs that were created.
 func createPeerConfigs(clients map[netip.Addr]*WgClient) ([]wgtypes.PeerConfig, error) {
 	peerConfigs := make([]wgtypes.PeerConfig, 0, len(clients))
+	var joinedErr error
 	for addr, client := range clients {
-		if client == nil {
-			return nil, fmt.Errorf("nil client for %s", addr)
-		}
-		if client.Tun == nil {
-			return nil, fmt.Errorf("nil tun factory for %s", addr)
-		}
-		if !client.ClientIpv4.Is4() {
-			return nil, fmt.Errorf("client %s has invalid ipv4 %s", addr, client.ClientIpv4)
-		}
-		if addr != client.ClientIpv4 {
-			return nil, fmt.Errorf("client map key %s does not match client ipv4 %s", addr, client.ClientIpv4)
-		}
-
-		publicKey, err := wgtypes.ParseKey(client.PublicKey)
+		peerConfig, err := createPeerConfig(addr, client)
 		if err != nil {
-			return nil, fmt.Errorf("parse public key for %s: %w", addr, err)
-		}
-		var presharedKey *wgtypes.Key
-		if client.PresharedKey != "" {
-			presharedKey_, err := wgtypes.ParseKey(client.PresharedKey)
-			if err != nil {
-				return nil, fmt.Errorf("parse preshared key for %s: %w", addr, err)
-			}
-			presharedKey = &presharedKey_
-		}
-		peerConfig := wgtypes.PeerConfig{
-			PublicKey:         publicKey,
-			PresharedKey:      presharedKey,
-			ReplaceAllowedIPs: true,
-			AllowedIPs: []net.IPNet{
-				{
-					IP:   net.IP(client.ClientIpv4.AsSlice()),
-					Mask: net.CIDRMask(32, 32),
-				},
-			},
+			joinedErr = errors.Join(joinedErr, err)
+			continue
 		}
 		peerConfigs = append(peerConfigs, peerConfig)
 	}
-	return peerConfigs, nil
+	return peerConfigs, joinedErr
+}
+
+func createPeerConfig(addr netip.Addr, client *WgClient) (wgtypes.PeerConfig, error) {
+	if client == nil {
+		return wgtypes.PeerConfig{}, fmt.Errorf("nil client for %s", addr)
+	}
+	if client.Tun == nil {
+		return wgtypes.PeerConfig{}, fmt.Errorf("nil tun factory for %s", addr)
+	}
+	if !client.ClientIpv4.Is4() {
+		return wgtypes.PeerConfig{}, fmt.Errorf("client %s has invalid ipv4 %s", addr, client.ClientIpv4)
+	}
+	if addr != client.ClientIpv4 {
+		return wgtypes.PeerConfig{}, fmt.Errorf("client map key %s does not match client ipv4 %s", addr, client.ClientIpv4)
+	}
+
+	publicKey, err := wgtypes.ParseKey(client.PublicKey)
+	if err != nil {
+		return wgtypes.PeerConfig{}, fmt.Errorf("parse public key for %s: %w", addr, err)
+	}
+	var presharedKey *wgtypes.Key
+	if client.PresharedKey != "" {
+		presharedKey_, err := wgtypes.ParseKey(client.PresharedKey)
+		if err != nil {
+			return wgtypes.PeerConfig{}, fmt.Errorf("parse preshared key for %s: %w", addr, err)
+		}
+		presharedKey = &presharedKey_
+	}
+	return wgtypes.PeerConfig{
+		PublicKey:         publicKey,
+		PresharedKey:      presharedKey,
+		ReplaceAllowedIPs: true,
+		AllowedIPs: []net.IPNet{
+			{
+				IP:   net.IP(client.ClientIpv4.AsSlice()),
+				Mask: net.CIDRMask(32, 32),
+			},
+		},
+	}, nil
 }
 
 func WgGenKeyPair() (privateKey wgtypes.Key, publicKey wgtypes.Key, err error) {

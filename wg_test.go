@@ -136,29 +136,100 @@ func TestWgProxyWithUserspaceWireGuardClient(t *testing.T) {
 	}
 }
 
-func TestWgProxyRejectsMismatchedClientMapKey(t *testing.T) {
+func TestCreatePeerConfigsSkipsInvalidClients(t *testing.T) {
+	_, publicKey, err := WgGenKeyPairStrings()
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	tun := func() (WgTun, error) { return newRecordingWgTun(), nil }
+
+	validIP := netip.MustParseAddr("10.0.0.3")
+	peers, err := createPeerConfigs(map[netip.Addr]*WgClient{
+		// valid: map key matches ClientIpv4 and the public key parses
+		validIP: {
+			PublicKey:  publicKey,
+			ClientIpv4: validIP,
+			Tun:        tun,
+		},
+		// invalid: map key does not match ClientIpv4
+		netip.MustParseAddr("10.0.0.2"): {
+			PublicKey:  publicKey,
+			ClientIpv4: netip.MustParseAddr("10.0.0.4"),
+			Tun:        tun,
+		},
+		// invalid: public key does not parse
+		netip.MustParseAddr("10.0.0.5"): {
+			PublicKey:  "not-a-valid-key",
+			ClientIpv4: netip.MustParseAddr("10.0.0.5"),
+			Tun:        tun,
+		},
+	})
+
+	// Partial success: the invalid clients are reported, but the valid peer is
+	// still returned.
+	if err == nil {
+		t.Fatal("createPeerConfigs did not report the invalid clients")
+	}
+	if len(peers) != 1 {
+		t.Fatalf("createPeerConfigs returned %d peers, want 1 (only the valid client)", len(peers))
+	}
+	wantKey, err := wgtypes.ParseKey(publicKey)
+	if err != nil {
+		t.Fatalf("parse public key: %v", err)
+	}
+	if peers[0].PublicKey != wantKey {
+		t.Fatalf("peer public key = %v, want the valid client key", peers[0].PublicKey)
+	}
+}
+
+func TestWgProxySetClientsContinuesPastInvalidClients(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	wg := NewWgProxy(ctx, DefaultWgProxySettings())
 	defer wg.Close()
 
-	_, publicKey, err := WgGenKeyPairStrings()
+	_, validKey, err := WgGenKeyPairStrings()
 	if err != nil {
-		t.Fatalf("generate keypair: %v", err)
+		t.Fatalf("generate valid keypair: %v", err)
 	}
-	mapKey := netip.MustParseAddr("10.0.0.2")
-	clientIP := netip.MustParseAddr("10.0.0.3")
+	_, invalidKey, err := WgGenKeyPairStrings()
+	if err != nil {
+		t.Fatalf("generate invalid keypair: %v", err)
+	}
+	tun := func() (WgTun, error) { return newRecordingWgTun(), nil }
+
+	validIP := netip.MustParseAddr("10.0.0.3")
+	// One valid client alongside one whose map key does not match its
+	// ClientIpv4. The invalid client is skipped while the valid one is applied.
 	err = wg.SetClients(map[netip.Addr]*WgClient{
-		mapKey: {
-			PublicKey:  publicKey,
-			ClientIpv4: clientIP,
-			Tun: func() (WgTun, error) {
-				return newRecordingWgTun(), nil
-			},
+		validIP: {
+			PublicKey:  validKey,
+			ClientIpv4: validIP,
+			Tun:        tun,
+		},
+		netip.MustParseAddr("10.0.0.2"): {
+			PublicKey:  invalidKey,
+			ClientIpv4: netip.MustParseAddr("10.0.0.4"),
+			Tun:        tun,
 		},
 	})
-	if err == nil {
-		t.Fatal("SetClients succeeded with mismatched map key and client ipv4")
+	if err != nil {
+		t.Fatalf("SetClients returned error for partially invalid input: %v", err)
+	}
+
+	dev, err := wg.device.IpcGet()
+	if err != nil {
+		t.Fatalf("IpcGet: %v", err)
+	}
+	if len(dev.Peers) != 1 {
+		t.Fatalf("device has %d peers, want 1 (only the valid client)", len(dev.Peers))
+	}
+	wantKey, err := wgtypes.ParseKey(validKey)
+	if err != nil {
+		t.Fatalf("parse valid key: %v", err)
+	}
+	if dev.Peers[0].PublicKey != wantKey {
+		t.Fatalf("registered peer key = %v, want the valid client", dev.Peers[0].PublicKey)
 	}
 }
 
