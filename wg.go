@@ -39,10 +39,11 @@ type WgClient struct {
 }
 
 type WgTun interface {
-	CancelIfIdle() bool
+	// CancelIfIdle() bool
+	UpdateActivity() bool
 	Send([]byte) bool
 	SetReceive(chan []byte)
-	Close() error
+	Cancel()
 }
 
 func DefaultWgProxySettings() *WgProxySettings {
@@ -144,34 +145,34 @@ func NewWgProxy(ctx context.Context, settings *WgProxySettings) *WgProxy {
 	}
 	wg.device = device.NewDevice(&wgTunDevice{proxy: wg}, conn.NewDefaultBind(), logger)
 
-	go connect.HandleError(wg.run)
+	// go connect.HandleError(wg.run)
 
 	return wg
 }
 
-func (self *WgProxy) run() {
-	defer self.closeActiveClients()
-	defer self.cancel()
-	for {
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
+// func (self *WgProxy) run() {
+// 	defer self.closeActiveClients()
+// 	defer self.cancel()
+// 	for {
+// 		func() {
+// 			self.stateLock.Lock()
+// 			defer self.stateLock.Unlock()
 
-			for addr, activeTun := range self.activeClients {
-				if activeTun.CancelIfIdle() {
-					activeTun.SetReceive(nil)
-					delete(self.activeClients, addr)
-				}
-			}
-		}()
+// 			for addr, activeTun := range self.activeClients {
+// 				if activeTun.CancelIfIdle() {
+// 					activeTun.SetReceive(nil)
+// 					delete(self.activeClients, addr)
+// 				}
+// 			}
+// 		}()
 
-		select {
-		case <-self.ctx.Done():
-			return
-		case <-time.After(self.settings.CheckTunIdleTimeout):
-		}
-	}
-}
+// 		select {
+// 		case <-self.ctx.Done():
+// 			return
+// 		case <-time.After(self.settings.CheckTunIdleTimeout):
+// 		}
+// 	}
+// }
 
 func (self *WgProxy) ListenAndServe(ipv4 string, ipv6 string, port int) error {
 	defer self.cancel()
@@ -244,19 +245,19 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 			if err == nil {
 				if tun != activeTun {
 					activeTun.SetReceive(nil)
-					activeTun.Close()
+					activeTun.Cancel()
 					tun.SetReceive(self.receive)
 					self.activeClients[addr] = tun
 				}
 			} else {
 				activeTun.SetReceive(nil)
-				activeTun.Close()
+				activeTun.Cancel()
 				delete(self.activeClients, addr)
 				returnErr = errors.Join(returnErr, err)
 			}
 		} else {
 			activeTun.SetReceive(nil)
-			activeTun.Close()
+			activeTun.Cancel()
 			delete(self.activeClients, addr)
 		}
 	}
@@ -309,13 +310,20 @@ func (self *WgProxy) activateClient(addr netip.Addr) (WgTun, error) {
 
 	tun, ok := self.activeClients[addr]
 	if ok {
-		return tun, nil
+		if tun.UpdateActivity() {
+			return tun, nil
+		} else {
+			tun.Cancel()
+			tun.SetReceive(nil)
+			delete(self.activeClients, addr)
+		}
 	}
 
 	client, ok := self.clients[addr]
 	if ok {
 		tun, err := client.Tun()
 		if err == nil {
+			tun.UpdateActivity()
 			tun.SetReceive(self.receive)
 			self.activeClients[addr] = tun
 			return tun, nil
@@ -414,7 +422,7 @@ func (self *WgProxy) closeActiveClients() {
 
 		for _, activeTun := range self.activeClients {
 			activeTun.SetReceive(nil)
-			activeTun.Close()
+			activeTun.Cancel()
 		}
 		clear(self.activeClients)
 	})
