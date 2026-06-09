@@ -309,6 +309,12 @@ func (self *WgProxy) activateClient(addr netip.Addr) (WgTun, error) {
 	tun, ok := self.activeClients[addr]
 	if ok {
 		if tun.UpdateActivity() {
+			// Re-assert wg "receive" mode on each call. The proxy device is
+			// shared per proxy id, so a tun-based call (http/socks) may have
+			// reset it to tun mode via SetReceive(nil). The device's SetReceive
+			// is idempotent when the channel is unchanged, so this is free in
+			// the common case.
+			tun.SetReceive(self.receive)
 			return tun, nil
 		} else {
 			tun.Cancel()
