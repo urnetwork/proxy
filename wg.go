@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/exp/maps"
-
 	uwgtun "github.com/urnetwork/userwireguard/tun"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -220,7 +218,7 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 
 	// createPeerConfigs is best-effort: invalid clients are skipped and reported
 	// here, but the valid peers are still applied.
-	peers, err := createPeerConfigs(clients)
+	peers, applied, err := createPeerConfigs(clients)
 	if err != nil {
 		glog.Errorf("[wg]SetClients: %s\n", err)
 	}
@@ -235,8 +233,9 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 		return
 	}
 
+	// record only the clients whose peer was actually applied
 	clear(self.clients)
-	for addr, client := range clients {
+	for addr, client := range applied {
 		self.clients[addr] = client
 	}
 	for addr, activeTun := range self.activeClients {
@@ -265,24 +264,23 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 	return
 }
 
-// only clients not already in the state are added
+// AddClients applies the given clients to the device without replacing existing
+// peers (ReplacePeers:false). It is idempotent: re-applying an already
+// registered client is a no-op/update, and a client that was dropped on a
+// previous call (e.g. a transient validation failure) is retried here rather
+// than being stranded as "known". Only the clients whose peer config was
+// actually applied are recorded in the state.
 func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (returnErr error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	newClients := maps.Clone(clients)
-	for addr, _ := range newClients {
-		if _, ok := self.clients[addr]; ok {
-			delete(newClients, addr)
-		}
-	}
-	if len(newClients) == 0 {
+	if len(clients) == 0 {
 		return
 	}
 
 	// createPeerConfigs is best-effort: invalid clients are skipped and reported
 	// here, but the valid peers are still applied.
-	peers, err := createPeerConfigs(newClients)
+	peers, applied, err := createPeerConfigs(clients)
 	if err != nil {
 		glog.Errorf("[wg]AddClients: %s\n", err)
 	}
@@ -297,7 +295,7 @@ func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (returnErr err
 		return
 	}
 
-	for addr, client := range newClients {
+	for addr, client := range applied {
 		self.clients[addr] = client
 	}
 
@@ -430,11 +428,14 @@ func (self *WgProxy) closeActiveClients() {
 
 // createPeerConfigs converts clients into wg peer configs on a best-effort
 // basis. Invalid clients are skipped and their errors are joined into the
-// returned error. The returned configs and error are independent: a non-nil
-// error may accompany a non-empty slice. Callers should log the error and
-// continue applying the peer configs that were created.
-func createPeerConfigs(clients map[netip.Addr]*WgClient) ([]wgtypes.PeerConfig, error) {
+// returned error. It also returns the subset of clients whose peer config was
+// actually created, so callers can record exactly the clients they applied to
+// the device (and retry the dropped ones on a later update rather than
+// stranding them as "known"). The returned configs and error are independent: a
+// non-nil error may accompany a non-empty slice.
+func createPeerConfigs(clients map[netip.Addr]*WgClient) ([]wgtypes.PeerConfig, map[netip.Addr]*WgClient, error) {
 	peerConfigs := make([]wgtypes.PeerConfig, 0, len(clients))
+	applied := make(map[netip.Addr]*WgClient, len(clients))
 	var joinedErr error
 	for addr, client := range clients {
 		peerConfig, err := createPeerConfig(addr, client)
@@ -443,8 +444,9 @@ func createPeerConfigs(clients map[netip.Addr]*WgClient) ([]wgtypes.PeerConfig, 
 			continue
 		}
 		peerConfigs = append(peerConfigs, peerConfig)
+		applied[addr] = client
 	}
-	return peerConfigs, joinedErr
+	return peerConfigs, applied, joinedErr
 }
 
 func createPeerConfig(addr netip.Addr, client *WgClient) (wgtypes.PeerConfig, error) {
