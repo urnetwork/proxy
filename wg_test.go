@@ -144,7 +144,7 @@ func TestCreatePeerConfigsSkipsInvalidClients(t *testing.T) {
 	tun := func() (WgTun, error) { return newRecordingWgTun(), nil }
 
 	validIP := netip.MustParseAddr("10.0.0.3")
-	peers, err := createPeerConfigs(map[netip.Addr]*WgClient{
+	peers, applied, err := createPeerConfigs(map[netip.Addr]*WgClient{
 		// valid: map key matches ClientIpv4 and the public key parses
 		validIP: {
 			PublicKey:  publicKey,
@@ -172,6 +172,12 @@ func TestCreatePeerConfigsSkipsInvalidClients(t *testing.T) {
 	}
 	if len(peers) != 1 {
 		t.Fatalf("createPeerConfigs returned %d peers, want 1 (only the valid client)", len(peers))
+	}
+	if len(applied) != 1 {
+		t.Fatalf("createPeerConfigs applied %d clients, want 1 (only the valid client)", len(applied))
+	}
+	if _, ok := applied[validIP]; !ok {
+		t.Fatalf("createPeerConfigs did not record the valid client as applied")
 	}
 	wantKey, err := wgtypes.ParseKey(publicKey)
 	if err != nil {
@@ -273,6 +279,12 @@ func newRecordingWgTun() *recordingWgTun {
 func (self *recordingWgTun) CancelIfIdle() bool {
 	return false
 }
+
+func (self *recordingWgTun) UpdateActivity() bool {
+	return true
+}
+
+func (self *recordingWgTun) Cancel() {}
 
 func (self *recordingWgTun) Send(packet []byte) bool {
 	packetCopy := append([]byte(nil), packet...)
