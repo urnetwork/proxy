@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	// "strconv"
@@ -28,6 +29,9 @@ import (
 var DidNotSendError = errors.New("did not send")
 var PacketTooLargeError = errors.New("packet too large for buffer")
 
+// MaxClients is the maximum number of clients (peers) a wg device supports
+const MaxClients = device.MaxPeers
+
 type WgClient struct {
 	PublicKey string
 	// TODO this is the signed proxy id
@@ -49,6 +53,7 @@ func DefaultWgProxySettings() *WgProxySettings {
 		ReceiveSequenceSize: 1024,
 		EventsSequenceSize:  16,
 		CheckTunIdleTimeout: 1 * time.Minute,
+		ClientBatchSize:     256,
 	}
 }
 
@@ -58,6 +63,10 @@ type WgProxySettings struct {
 	EventsSequenceSize  int
 	CheckTunIdleTimeout time.Duration
 	FirewallMark        int
+	// peers are applied to the device in batches of this size, so that a
+	// failing peer drops at most one batch (which is then retried per peer)
+	// rather than the entire set
+	ClientBatchSize int
 }
 
 // implements wg device:
@@ -77,8 +86,11 @@ type WgProxy struct {
 
 	stateLock sync.Mutex
 
-	clients       map[netip.Addr]*WgClient
-	activeClients map[netip.Addr]WgTun
+	clients map[netip.Addr]*WgClient
+	// when each client's config was last applied to the device,
+	// used as a removal grace cutoff by `RemoveClients`
+	clientAddTimes map[netip.Addr]time.Time
+	activeClients  map[netip.Addr]WgTun
 
 	closeActiveClientsOnce sync.Once
 }
@@ -124,13 +136,14 @@ func NewWgProxy(ctx context.Context, settings *WgProxySettings) *WgProxy {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	wg := &WgProxy{
-		ctx:           cancelCtx,
-		cancel:        cancel,
-		settings:      settings,
-		events:        make(chan uwgtun.Event, settings.EventsSequenceSize),
-		receive:       make(chan []byte, settings.ReceiveSequenceSize),
-		clients:       map[netip.Addr]*WgClient{},
-		activeClients: map[netip.Addr]WgTun{},
+		ctx:            cancelCtx,
+		cancel:         cancel,
+		settings:       settings,
+		events:         make(chan uwgtun.Event, settings.EventsSequenceSize),
+		receive:        make(chan []byte, settings.ReceiveSequenceSize),
+		clients:        map[netip.Addr]*WgClient{},
+		clientAddTimes: map[netip.Addr]time.Time{},
+		activeClients:  map[netip.Addr]WgTun{},
 	}
 
 	logger := &logger.Logger{
@@ -181,11 +194,14 @@ func (self *WgProxy) ListenAndServe(ipv4 string, ipv6 string, port int) error {
 	}
 
 	glog.Infof("[wg]ipv4=%s ipv6=%s port=%d fwmark=%d\n", ipv4, ipv6, port, self.settings.FirewallMark)
+	// ReplacePeers must be false: this initial device config races with
+	// AddClients at startup (e.g. the proxy client restore after a restart),
+	// and a wipe here would silently drop any peers that won the race
 	config := &device.Config{
 		Config: wgtypes.Config{
 			PrivateKey:   &privateKey,
 			ListenPort:   &port,
-			ReplacePeers: true,
+			ReplacePeers: false,
 			Peers:        []wgtypes.PeerConfig{},
 		},
 		BindIpv4: &ipv4,
@@ -216,28 +232,20 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	// createPeerConfigs is best-effort: invalid clients are skipped and reported
-	// here, but the valid peers are still applied.
-	peers, applied, err := createPeerConfigs(clients)
-	if err != nil {
-		glog.Errorf("[wg]SetClients: %s\n", err)
-	}
-
-	config := wgtypes.Config{
+	// wipe all peers, then re-apply the given clients in batches
+	wipeConfig := wgtypes.Config{
 		ReplacePeers: true,
-		Peers:        peers,
+		Peers:        []wgtypes.PeerConfig{},
 	}
-
-	returnErr = self.device.IpcSet(&config)
+	returnErr = self.device.IpcSet(&wipeConfig)
 	if returnErr != nil {
 		return
 	}
-
-	// record only the clients whose peer was actually applied
 	clear(self.clients)
-	for addr, client := range applied {
-		self.clients[addr] = client
-	}
+	clear(self.clientAddTimes)
+
+	_, returnErr = self.addClientsLocked(clients)
+
 	for addr, activeTun := range self.activeClients {
 		if client, ok := self.clients[addr]; ok {
 			tun, err := client.Tun()
@@ -268,37 +276,135 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 // peers (ReplacePeers:false). It is idempotent: re-applying an already
 // registered client is a no-op/update, and a client that was dropped on a
 // previous call (e.g. a transient validation failure) is retried here rather
-// than being stranded as "known". Only the clients whose peer config was
-// actually applied are recorded in the state.
-func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (returnErr error) {
+// than being stranded as "known". Peers are applied in batches of
+// `ClientBatchSize`; a failed batch is retried per peer so that one bad peer
+// cannot drop the rest (e.g. during the full restore at instance startup).
+// The returned map contains exactly the clients whose peer config was applied
+// to the device in this call; per-client failures are joined into the error.
+func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (map[netip.Addr]*WgClient, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	return self.addClientsLocked(clients)
+}
 
+func (self *WgProxy) addClientsLocked(clients map[netip.Addr]*WgClient) (applied map[netip.Addr]*WgClient, returnErr error) {
+	applied = map[netip.Addr]*WgClient{}
 	if len(clients) == 0 {
 		return
 	}
 
-	// createPeerConfigs is best-effort: invalid clients are skipped and reported
-	// here, but the valid peers are still applied.
-	peers, applied, err := createPeerConfigs(clients)
-	if err != nil {
-		glog.Errorf("[wg]AddClients: %s\n", err)
+	// createPeerEntries is best-effort: invalid clients are skipped and joined
+	// into the error, but the valid peers are still applied.
+	entries, returnErr := createPeerEntries(clients)
+
+	batchSize := self.settings.ClientBatchSize
+	if batchSize <= 0 {
+		batchSize = len(entries)
 	}
 
-	config := wgtypes.Config{
-		ReplacePeers: false,
-		Peers:        peers,
+	now := time.Now()
+	record := func(entry *wgPeerEntry) {
+		self.clients[entry.addr] = entry.client
+		self.clientAddTimes[entry.addr] = now
+		applied[entry.addr] = entry.client
 	}
 
-	returnErr = self.device.IpcSet(&config)
-	if returnErr != nil {
-		return
+	for start := 0; start < len(entries); start += batchSize {
+		batch := entries[start:min(start+batchSize, len(entries))]
+		peers := make([]wgtypes.PeerConfig, 0, len(batch))
+		for _, entry := range batch {
+			peers = append(peers, entry.peerConfig)
+		}
+		config := wgtypes.Config{
+			ReplacePeers: false,
+			Peers:        peers,
+		}
+		if err := self.device.IpcSet(&config); err == nil {
+			for _, entry := range batch {
+				record(entry)
+			}
+		} else {
+			// the device applies peers in order and stops at the first error,
+			// so retry each peer individually to apply the rest of the batch
+			for _, entry := range batch {
+				config := wgtypes.Config{
+					ReplacePeers: false,
+					Peers:        []wgtypes.PeerConfig{entry.peerConfig},
+				}
+				if err := self.device.IpcSet(&config); err == nil {
+					record(entry)
+				} else {
+					returnErr = errors.Join(returnErr, fmt.Errorf("add client %s: %w", entry.addr, err))
+				}
+			}
+		}
 	}
 
-	for addr, client := range applied {
-		self.clients[addr] = client
+	if maxPeers := device.MaxPeers; (maxPeers*9)/10 <= len(self.clients) {
+		glog.Warningf("[wg]peer count %d is near the device limit %d\n", len(self.clients), maxPeers)
 	}
 
+	return
+}
+
+// Clients returns the registered client addresses with the time each client's
+// config was last applied.
+func (self *WgProxy) Clients() map[netip.Addr]time.Time {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return maps.Clone(self.clientAddTimes)
+}
+
+func (self *WgProxy) ClientCount() int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return len(self.clients)
+}
+
+// RemoveClients removes the peers for the given addresses from the device and
+// forgets the clients. Only clients whose config was last applied before
+// `addedBefore` are removed: a reconcile pass computes removals from a db
+// snapshot, and the cutoff makes a client applied concurrently with the
+// snapshot (e.g. by a warmup call) immune until the next pass.
+func (self *WgProxy) RemoveClients(addedBefore time.Time, addrs ...netip.Addr) (returnErr error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	for _, addr := range addrs {
+		client, ok := self.clients[addr]
+		if !ok {
+			continue
+		}
+		if addTime, ok := self.clientAddTimes[addr]; ok && !addTime.Before(addedBefore) {
+			continue
+		}
+		publicKey, err := wgtypes.ParseKey(client.PublicKey)
+		if err != nil {
+			// the key parsed when the client was applied, so this is unexpected
+			returnErr = errors.Join(returnErr, fmt.Errorf("remove client %s: %w", addr, err))
+			continue
+		}
+		config := wgtypes.Config{
+			Peers: []wgtypes.PeerConfig{
+				{
+					PublicKey:  publicKey,
+					Remove:     true,
+					UpdateOnly: true,
+				},
+			},
+		}
+		if err := self.device.IpcSet(&config); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("remove client %s: %w", addr, err))
+			continue
+		}
+		delete(self.clients, addr)
+		delete(self.clientAddTimes, addr)
+		if activeTun, ok := self.activeClients[addr]; ok {
+			activeTun.SetReceive(nil)
+			activeTun.Cancel()
+			delete(self.activeClients, addr)
+		}
+	}
 	return
 }
 
@@ -432,16 +538,19 @@ func (self *WgProxy) closeActiveClients() {
 	})
 }
 
-// createPeerConfigs converts clients into wg peer configs on a best-effort
+type wgPeerEntry struct {
+	addr       netip.Addr
+	client     *WgClient
+	peerConfig wgtypes.PeerConfig
+}
+
+// createPeerEntries converts clients into wg peer configs on a best-effort
 // basis. Invalid clients are skipped and their errors are joined into the
-// returned error. It also returns the subset of clients whose peer config was
-// actually created, so callers can record exactly the clients they applied to
-// the device (and retry the dropped ones on a later update rather than
-// stranding them as "known"). The returned configs and error are independent: a
+// returned error, so callers can apply the valid peers and record exactly the
+// clients that were applied. The returned entries and error are independent: a
 // non-nil error may accompany a non-empty slice.
-func createPeerConfigs(clients map[netip.Addr]*WgClient) ([]wgtypes.PeerConfig, map[netip.Addr]*WgClient, error) {
-	peerConfigs := make([]wgtypes.PeerConfig, 0, len(clients))
-	applied := make(map[netip.Addr]*WgClient, len(clients))
+func createPeerEntries(clients map[netip.Addr]*WgClient) ([]*wgPeerEntry, error) {
+	entries := make([]*wgPeerEntry, 0, len(clients))
 	var joinedErr error
 	for addr, client := range clients {
 		peerConfig, err := createPeerConfig(addr, client)
@@ -449,10 +558,13 @@ func createPeerConfigs(clients map[netip.Addr]*WgClient) ([]wgtypes.PeerConfig, 
 			joinedErr = errors.Join(joinedErr, err)
 			continue
 		}
-		peerConfigs = append(peerConfigs, peerConfig)
-		applied[addr] = client
+		entries = append(entries, &wgPeerEntry{
+			addr:       addr,
+			client:     client,
+			peerConfig: peerConfig,
+		})
 	}
-	return peerConfigs, applied, joinedErr
+	return entries, joinedErr
 }
 
 func createPeerConfig(addr netip.Addr, client *WgClient) (wgtypes.PeerConfig, error) {

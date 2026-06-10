@@ -136,7 +136,7 @@ func TestWgProxyWithUserspaceWireGuardClient(t *testing.T) {
 	}
 }
 
-func TestCreatePeerConfigsSkipsInvalidClients(t *testing.T) {
+func TestCreatePeerEntriesSkipsInvalidClients(t *testing.T) {
 	_, publicKey, err := WgGenKeyPairStrings()
 	if err != nil {
 		t.Fatalf("generate keypair: %v", err)
@@ -144,7 +144,7 @@ func TestCreatePeerConfigsSkipsInvalidClients(t *testing.T) {
 	tun := func() (WgTun, error) { return newRecordingWgTun(), nil }
 
 	validIP := netip.MustParseAddr("10.0.0.3")
-	peers, applied, err := createPeerConfigs(map[netip.Addr]*WgClient{
+	entries, err := createPeerEntries(map[netip.Addr]*WgClient{
 		// valid: map key matches ClientIpv4 and the public key parses
 		validIP: {
 			PublicKey:  publicKey,
@@ -168,23 +168,20 @@ func TestCreatePeerConfigsSkipsInvalidClients(t *testing.T) {
 	// Partial success: the invalid clients are reported, but the valid peer is
 	// still returned.
 	if err == nil {
-		t.Fatal("createPeerConfigs did not report the invalid clients")
+		t.Fatal("createPeerEntries did not report the invalid clients")
 	}
-	if len(peers) != 1 {
-		t.Fatalf("createPeerConfigs returned %d peers, want 1 (only the valid client)", len(peers))
+	if len(entries) != 1 {
+		t.Fatalf("createPeerEntries returned %d entries, want 1 (only the valid client)", len(entries))
 	}
-	if len(applied) != 1 {
-		t.Fatalf("createPeerConfigs applied %d clients, want 1 (only the valid client)", len(applied))
-	}
-	if _, ok := applied[validIP]; !ok {
-		t.Fatalf("createPeerConfigs did not record the valid client as applied")
+	if entries[0].addr != validIP {
+		t.Fatalf("createPeerEntries entry addr = %v, want the valid client", entries[0].addr)
 	}
 	wantKey, err := wgtypes.ParseKey(publicKey)
 	if err != nil {
 		t.Fatalf("parse public key: %v", err)
 	}
-	if peers[0].PublicKey != wantKey {
-		t.Fatalf("peer public key = %v, want the valid client key", peers[0].PublicKey)
+	if entries[0].peerConfig.PublicKey != wantKey {
+		t.Fatalf("peer public key = %v, want the valid client key", entries[0].peerConfig.PublicKey)
 	}
 }
 
@@ -206,7 +203,8 @@ func TestWgProxySetClientsContinuesPastInvalidClients(t *testing.T) {
 
 	validIP := netip.MustParseAddr("10.0.0.3")
 	// One valid client alongside one whose map key does not match its
-	// ClientIpv4. The invalid client is skipped while the valid one is applied.
+	// ClientIpv4. The invalid client is skipped (and reported) while the valid
+	// one is still applied.
 	err = wg.SetClients(map[netip.Addr]*WgClient{
 		validIP: {
 			PublicKey:  validKey,
@@ -219,8 +217,8 @@ func TestWgProxySetClientsContinuesPastInvalidClients(t *testing.T) {
 			Tun:        tun,
 		},
 	})
-	if err != nil {
-		t.Fatalf("SetClients returned error for partially invalid input: %v", err)
+	if err == nil {
+		t.Fatal("SetClients did not report the invalid client")
 	}
 
 	dev, err := wg.device.IpcGet()
@@ -236,6 +234,119 @@ func TestWgProxySetClientsContinuesPastInvalidClients(t *testing.T) {
 	}
 	if dev.Peers[0].PublicKey != wantKey {
 		t.Fatalf("registered peer key = %v, want the valid client", dev.Peers[0].PublicKey)
+	}
+}
+
+// AddClients applies peers in batches; all clients across multiple batches
+// must land in the device and be recorded with an add time.
+func TestWgProxyAddClientsBatches(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	settings := DefaultWgProxySettings()
+	settings.ClientBatchSize = 2
+	wg := NewWgProxy(ctx, settings)
+	defer wg.Close()
+
+	tun := func() (WgTun, error) { return newRecordingWgTun(), nil }
+	clients := map[netip.Addr]*WgClient{}
+	for i := range 5 {
+		_, publicKey, err := WgGenKeyPairStrings()
+		if err != nil {
+			t.Fatalf("generate keypair: %v", err)
+		}
+		addr := netip.AddrFrom4([4]byte{10, 0, 1, byte(i + 1)})
+		clients[addr] = &WgClient{
+			PublicKey:  publicKey,
+			ClientIpv4: addr,
+			Tun:        tun,
+		}
+	}
+
+	before := time.Now()
+	applied, err := wg.AddClients(clients)
+	if err != nil {
+		t.Fatalf("AddClients: %v", err)
+	}
+	if len(applied) != len(clients) {
+		t.Fatalf("AddClients applied %d clients, want %d", len(applied), len(clients))
+	}
+	if count := wg.ClientCount(); count != len(clients) {
+		t.Fatalf("ClientCount = %d, want %d", count, len(clients))
+	}
+	dev, err := wg.device.IpcGet()
+	if err != nil {
+		t.Fatalf("IpcGet: %v", err)
+	}
+	if len(dev.Peers) != len(clients) {
+		t.Fatalf("device has %d peers, want %d", len(dev.Peers), len(clients))
+	}
+	addTimes := wg.Clients()
+	if len(addTimes) != len(clients) {
+		t.Fatalf("Clients returned %d entries, want %d", len(addTimes), len(clients))
+	}
+	for addr, addTime := range addTimes {
+		if addTime.Before(before) {
+			t.Fatalf("add time for %s predates the AddClients call", addr)
+		}
+	}
+}
+
+// RemoveClients removes peers from the device and respects the addedBefore
+// cutoff: clients applied at or after the cutoff are kept.
+func TestWgProxyRemoveClients(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wg := NewWgProxy(ctx, DefaultWgProxySettings())
+	defer wg.Close()
+
+	tun := func() (WgTun, error) { return newRecordingWgTun(), nil }
+	newClient := func(addr netip.Addr) *WgClient {
+		_, publicKey, err := WgGenKeyPairStrings()
+		if err != nil {
+			t.Fatalf("generate keypair: %v", err)
+		}
+		return &WgClient{
+			PublicKey:  publicKey,
+			ClientIpv4: addr,
+			Tun:        tun,
+		}
+	}
+
+	keepIP := netip.MustParseAddr("10.0.2.1")
+	staleIP := netip.MustParseAddr("10.0.2.2")
+	if _, err := wg.AddClients(map[netip.Addr]*WgClient{
+		keepIP:  newClient(keepIP),
+		staleIP: newClient(staleIP),
+	}); err != nil {
+		t.Fatalf("AddClients: %v", err)
+	}
+
+	// a cutoff before the add time must not remove anything (grace window)
+	if err := wg.RemoveClients(time.Now().Add(-time.Hour), staleIP); err != nil {
+		t.Fatalf("RemoveClients (grace): %v", err)
+	}
+	if count := wg.ClientCount(); count != 2 {
+		t.Fatalf("ClientCount after graced remove = %d, want 2", count)
+	}
+
+	// a cutoff after the add time removes the stale client only;
+	// removing an unknown addr is a no-op
+	unknownIP := netip.MustParseAddr("10.0.2.3")
+	if err := wg.RemoveClients(time.Now().Add(time.Hour), staleIP, unknownIP); err != nil {
+		t.Fatalf("RemoveClients: %v", err)
+	}
+	if count := wg.ClientCount(); count != 1 {
+		t.Fatalf("ClientCount after remove = %d, want 1", count)
+	}
+	if _, ok := wg.Clients()[keepIP]; !ok {
+		t.Fatal("RemoveClients removed the wrong client")
+	}
+	dev, err := wg.device.IpcGet()
+	if err != nil {
+		t.Fatalf("IpcGet: %v", err)
+	}
+	if len(dev.Peers) != 1 {
+		t.Fatalf("device has %d peers, want 1", len(dev.Peers))
 	}
 }
 
