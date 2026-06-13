@@ -7,11 +7,11 @@ import (
 	"log"
 	"net"
 	// "net/netip"
+	"flag"
 	"os"
 	"slices"
 	"strings"
 	"time"
-	"flag"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 	"github.com/samber/lo"
@@ -19,7 +19,6 @@ import (
 	"github.com/urfave/cli/v2"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
-	"github.com/urnetwork/proxy"
 )
 
 // this value is set via the linker, e.g.
@@ -184,7 +183,7 @@ func main() {
 				connect.DefaultApiMultiClientGeneratorSettings(),
 			)
 
-			dev, err := proxy.CreateTunWithDefaults(ctx)
+			dev, err := connect.CreateTunWithDefaults(ctx)
 			if err != nil {
 				return fmt.Errorf("create net tun failed: %w", err)
 			}
