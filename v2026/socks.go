@@ -20,7 +20,7 @@ import (
 	socks5 "github.com/things-go/go-socks5"
 	"github.com/things-go/go-socks5/statute"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 type SocksRequest = *socks5.Request
