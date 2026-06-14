@@ -21,12 +21,15 @@ import (
 	"github.com/things-go/go-socks5/statute"
 
 	"github.com/urnetwork/connect"
-	"github.com/urnetwork/glog"
 )
 
 type SocksRequest = *socks5.Request
 
 type SocksProxy struct {
+	// Log, when set, receives socks proxy logging. nil resolves to
+	// `connect.DefaultLogger()`.
+	Log connect.Logger
+
 	ProxyReadTimeout       time.Duration
 	ProxyWriteTimeout      time.Duration
 	ConnectDialWithRequest func(ctx context.Context, r SocksRequest, network string, addr string) (net.Conn, error)
@@ -121,7 +124,11 @@ func (self *SocksProxy) connectHandle(ctx context.Context, writer io.Writer, r S
 
 // socks.Logger
 func (self *SocksProxy) Errorf(format string, args ...any) {
-	glog.Errorf("[socks]"+format, args...)
+	log := self.Log
+	if log == nil {
+		log = connect.DefaultLogger()
+	}
+	log.Errorf("[socks]"+format, args...)
 }
 
 // socks.CredentialStore

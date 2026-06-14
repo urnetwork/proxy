@@ -14,8 +14,6 @@ import (
 	uwgtun "github.com/urnetwork/userwireguard/tun"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
-	"github.com/urnetwork/glog"
-
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/userwireguard/conn"
 	"github.com/urnetwork/userwireguard/device"
@@ -58,6 +56,10 @@ func DefaultWgProxySettings() *WgProxySettings {
 }
 
 type WgProxySettings struct {
+	// Log, when set, receives wg device and proxy logging. nil resolves to
+	// `connect.DefaultLogger()`.
+	Log connect.Logger
+
 	PrivateKey          string
 	ReceiveSequenceSize int
 	EventsSequenceSize  int
@@ -78,6 +80,7 @@ type WgProxy struct {
 	cancel context.CancelFunc
 
 	settings *WgProxySettings
+	log      connect.Logger
 
 	events  chan uwgtun.Event
 	receive chan []byte
@@ -135,10 +138,16 @@ func NewWgProxyWithDefaults(ctx context.Context) *WgProxy {
 func NewWgProxy(ctx context.Context, settings *WgProxySettings) *WgProxy {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
+	log := settings.Log
+	if log == nil {
+		log = connect.DefaultLogger()
+	}
+
 	wg := &WgProxy{
 		ctx:            cancelCtx,
 		cancel:         cancel,
 		settings:       settings,
+		log:            log,
 		events:         make(chan uwgtun.Event, settings.EventsSequenceSize),
 		receive:        make(chan []byte, settings.ReceiveSequenceSize),
 		clients:        map[netip.Addr]*WgClient{},
@@ -148,10 +157,10 @@ func NewWgProxy(ctx context.Context, settings *WgProxySettings) *WgProxy {
 
 	logger := &logger.Logger{
 		Verbosef: func(format string, args ...any) {
-			glog.Infof("[wg]"+format, args...)
+			log.Infof("[wg]"+format, args...)
 		},
 		Errorf: func(format string, args ...any) {
-			glog.Errorf("[wg]"+format, args...)
+			log.Errorf("[wg]"+format, args...)
 		},
 	}
 	wg.device = device.NewDevice(&wgTunDevice{proxy: wg}, conn.NewDefaultBind(), logger)
@@ -193,7 +202,7 @@ func (self *WgProxy) ListenAndServe(ipv4 string, ipv6 string, port int) error {
 		return err
 	}
 
-	glog.Infof("[wg]ipv4=%s ipv6=%s port=%d fwmark=%d\n", ipv4, ipv6, port, self.settings.FirewallMark)
+	self.log.Infof("[wg]ipv4=%s ipv6=%s port=%d fwmark=%d\n", ipv4, ipv6, port, self.settings.FirewallMark)
 	// ReplacePeers must be false: this initial device config races with
 	// AddClients at startup (e.g. the proxy client restore after a restart),
 	// and a wipe here would silently drop any peers that won the race
@@ -341,7 +350,7 @@ func (self *WgProxy) addClientsLocked(clients map[netip.Addr]*WgClient) (applied
 	}
 
 	if maxPeers := device.MaxPeers; (maxPeers*9)/10 <= len(self.clients) {
-		glog.Warningf("[wg]peer count %d is near the device limit %d\n", len(self.clients), maxPeers)
+		self.log.Warningf("[wg]peer count %d is near the device limit %d\n", len(self.clients), maxPeers)
 	}
 
 	return
@@ -613,6 +622,17 @@ func WgGenKeyPair() (privateKey wgtypes.Key, publicKey wgtypes.Key, err error) {
 	}
 	publicKey = privateKey.PublicKey()
 	return
+}
+
+// WgPublicKeyForPrivateKey derives the wg public key string that corresponds to
+// the given private key string. Used to verify that a configured keypair is
+// internally consistent (the public key actually belongs to the private key).
+func WgPublicKeyForPrivateKey(privateKeyStr string) (string, error) {
+	privateKey, err := wgtypes.ParseKey(privateKeyStr)
+	if err != nil {
+		return "", err
+	}
+	return privateKey.PublicKey().String(), nil
 }
 
 func WgGenKeyPairStrings() (privateKeyStr string, publicKeyStr string, err error) {
