@@ -391,6 +391,14 @@ func (self *recordingWgTun) CancelIfIdle() bool {
 	return false
 }
 
+// the mock is always a live, reachable device, so it is always active and
+// reusable (matches UpdateActivity always succeeding and CancelIfIdle never
+// firing); returning false here would make activateClient recreate the tun on
+// every call and strand the instance the tests hold a reference to.
+func (self *recordingWgTun) Active() bool {
+	return true
+}
+
 func (self *recordingWgTun) UpdateActivity() bool {
 	return true
 }
