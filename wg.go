@@ -88,7 +88,17 @@ type WgProxy struct {
 
 	device *device.Device
 
-	stateLock sync.Mutex
+	// controlLock serializes control-plane operations (AddClients / RemoveClients
+	// / SetClients) against each other and is held across device.IpcSet. It is
+	// NEVER taken by the data path, so programming peers does not block packet
+	// forwarding.
+	controlLock sync.Mutex
+
+	// stateLock guards the client maps below. It is held only for brief map
+	// reads/writes — never across device.IpcSet (see controlLock) or across a
+	// client.Tun() device creation — so the per-packet data path is not
+	// serialized behind slow control-plane or device-setup work.
+	stateLock sync.RWMutex
 
 	clients map[netip.Addr]*WgClient
 	// when each client's config was last applied to the device,
@@ -239,47 +249,83 @@ func (self *WgProxy) ListenAndServe(ipv4 string, ipv6 string, port int) error {
 // hot patches the devices into the wg server
 // if the device is already active, keep it active
 func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
+	self.controlLock.Lock()
+	defer self.controlLock.Unlock()
 
-	// wipe all peers, then re-apply the given clients in batches
+	// wipe all peers, then re-apply the given clients in batches. IpcSet runs
+	// outside stateLock (the device is internally synchronized) so the data path
+	// is not blocked while peers are reprogrammed.
 	wipeConfig := wgtypes.Config{
 		ReplacePeers: true,
 		Peers:        []wgtypes.PeerConfig{},
 	}
-	returnErr = self.device.IpcSet(&wipeConfig)
-	if returnErr != nil {
-		return
+	if err := self.device.IpcSet(&wipeConfig); err != nil {
+		return err
 	}
-	clear(self.clients)
-	clear(self.clientAddTimes)
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		clear(self.clients)
+		clear(self.clientAddTimes)
+	}()
 
-	_, returnErr = self.addClientsLocked(clients)
+	_, returnErr = self.addClients(clients)
 
-	for addr, activeTun := range self.activeClients {
-		if client, ok := self.clients[addr]; ok {
-			tun, err := client.Tun()
-			if err == nil {
-				if tun != activeTun {
-					activeTun.SetReceive(nil)
-					activeTun.Cancel()
-					tun.SetReceive(self.receive)
-					self.activeClients[addr] = tun
-				}
-			} else {
-				activeTun.SetReceive(nil)
-				activeTun.Cancel()
-				delete(self.activeClients, addr)
-				returnErr = errors.Join(returnErr, err)
-			}
-		} else {
-			activeTun.SetReceive(nil)
-			activeTun.Cancel()
-			delete(self.activeClients, addr)
+	// reconcile the active tuns against the new client set: drop tuns whose
+	// client was removed, and swap a tun that no longer matches its client's
+	// tun. Snapshot under the lock, but call client.Tun() (which may create a
+	// device) outside it.
+	type activeEntry struct {
+		addr      netip.Addr
+		activeTun WgTun
+		client    *WgClient
+	}
+	var actives []activeEntry
+	func() {
+		self.stateLock.RLock()
+		defer self.stateLock.RUnlock()
+		for addr, activeTun := range self.activeClients {
+			actives = append(actives, activeEntry{addr, activeTun, self.clients[addr]})
+		}
+	}()
+	for _, a := range actives {
+		if a.client == nil {
+			a.activeTun.SetReceive(nil)
+			a.activeTun.Cancel()
+			self.removeActiveClient(a.addr, a.activeTun)
+			continue
+		}
+		tun, err := a.client.Tun()
+		if err != nil {
+			a.activeTun.SetReceive(nil)
+			a.activeTun.Cancel()
+			self.removeActiveClient(a.addr, a.activeTun)
+			returnErr = errors.Join(returnErr, err)
+			continue
+		}
+		if tun != a.activeTun {
+			a.activeTun.SetReceive(nil)
+			a.activeTun.Cancel()
+			tun.SetReceive(self.receive)
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				self.activeClients[a.addr] = tun
+			}()
 		}
 	}
 
 	return
+}
+
+// removeActiveClient drops the active tun for addr, but only if it is still the
+// registered one (a concurrent activation may have replaced it).
+func (self *WgProxy) removeActiveClient(addr netip.Addr, activeTun WgTun) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.activeClients[addr] == activeTun {
+		delete(self.activeClients, addr)
+	}
 }
 
 // AddClients applies the given clients to the device without replacing existing
@@ -292,12 +338,17 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 // The returned map contains exactly the clients whose peer config was applied
 // to the device in this call; per-client failures are joined into the error.
 func (self *WgProxy) AddClients(clients map[netip.Addr]*WgClient) (map[netip.Addr]*WgClient, error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	return self.addClientsLocked(clients)
+	self.controlLock.Lock()
+	defer self.controlLock.Unlock()
+	return self.addClients(clients)
 }
 
-func (self *WgProxy) addClientsLocked(clients map[netip.Addr]*WgClient) (applied map[netip.Addr]*WgClient, returnErr error) {
+// addClients programs the given clients' peers into the device and records them.
+// The caller must hold controlLock (serializing control-plane device writes).
+// device.IpcSet runs WITHOUT stateLock; stateLock is taken only to record each
+// batch right after it is programmed, minimizing the window where a peer exists
+// in the device but is not yet routable via activateClient.
+func (self *WgProxy) addClients(clients map[netip.Addr]*WgClient) (applied map[netip.Addr]*WgClient, returnErr error) {
 	applied = map[netip.Addr]*WgClient{}
 	if len(clients) == 0 {
 		return
@@ -312,11 +363,15 @@ func (self *WgProxy) addClientsLocked(clients map[netip.Addr]*WgClient) (applied
 		batchSize = len(entries)
 	}
 
-	now := time.Now()
-	record := func(entry *wgPeerEntry) {
-		self.clients[entry.addr] = entry.client
-		self.clientAddTimes[entry.addr] = now
-		applied[entry.addr] = entry.client
+	record := func(batch []*wgPeerEntry) {
+		now := time.Now()
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		for _, entry := range batch {
+			self.clients[entry.addr] = entry.client
+			self.clientAddTimes[entry.addr] = now
+			applied[entry.addr] = entry.client
+		}
 	}
 
 	for start := 0; start < len(entries); start += batchSize {
@@ -330,9 +385,7 @@ func (self *WgProxy) addClientsLocked(clients map[netip.Addr]*WgClient) (applied
 			Peers:        peers,
 		}
 		if err := self.device.IpcSet(&config); err == nil {
-			for _, entry := range batch {
-				record(entry)
-			}
+			record(batch)
 		} else {
 			// the device applies peers in order and stops at the first error,
 			// so retry each peer individually to apply the rest of the batch
@@ -342,7 +395,7 @@ func (self *WgProxy) addClientsLocked(clients map[netip.Addr]*WgClient) (applied
 					Peers:        []wgtypes.PeerConfig{entry.peerConfig},
 				}
 				if err := self.device.IpcSet(&config); err == nil {
-					record(entry)
+					record([]*wgPeerEntry{entry})
 				} else {
 					returnErr = errors.Join(returnErr, fmt.Errorf("add client %s: %w", entry.addr, err))
 				}
@@ -350,8 +403,8 @@ func (self *WgProxy) addClientsLocked(clients map[netip.Addr]*WgClient) (applied
 		}
 	}
 
-	if maxPeers := device.MaxPeers; (maxPeers*9)/10 <= len(self.clients) {
-		self.log.Warningf("[wg]peer count %d is near the device limit %d\n", len(self.clients), maxPeers)
+	if count := self.ClientCount(); (device.MaxPeers*9)/10 <= count {
+		self.log.Warningf("[wg]peer count %d is near the device limit %d\n", count, device.MaxPeers)
 	}
 
 	return
@@ -360,14 +413,14 @@ func (self *WgProxy) addClientsLocked(clients map[netip.Addr]*WgClient) (applied
 // Clients returns the registered client addresses with the time each client's
 // config was last applied.
 func (self *WgProxy) Clients() map[netip.Addr]time.Time {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
+	self.stateLock.RLock()
+	defer self.stateLock.RUnlock()
 	return maps.Clone(self.clientAddTimes)
 }
 
 func (self *WgProxy) ClientCount() int {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
+	self.stateLock.RLock()
+	defer self.stateLock.RUnlock()
 	return len(self.clients)
 }
 
@@ -377,17 +430,30 @@ func (self *WgProxy) ClientCount() int {
 // snapshot, and the cutoff makes a client applied concurrently with the
 // snapshot (e.g. by a warmup call) immune until the next pass.
 func (self *WgProxy) RemoveClients(addedBefore time.Time, addrs ...netip.Addr) (returnErr error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
+	self.controlLock.Lock()
+	defer self.controlLock.Unlock()
 
 	for _, addr := range addrs {
-		client, ok := self.clients[addr]
-		if !ok {
+		// decide removal eligibility under the lock, then release it before the
+		// device write
+		var client *WgClient
+		func() {
+			self.stateLock.RLock()
+			defer self.stateLock.RUnlock()
+			c, ok := self.clients[addr]
+			if !ok {
+				return
+			}
+			if addTime, ok := self.clientAddTimes[addr]; ok && !addTime.Before(addedBefore) {
+				// applied at or after the cutoff: keep (grace window)
+				return
+			}
+			client = c
+		}()
+		if client == nil {
 			continue
 		}
-		if addTime, ok := self.clientAddTimes[addr]; ok && !addTime.Before(addedBefore) {
-			continue
-		}
+
 		publicKey, err := wgtypes.ParseKey(client.PublicKey)
 		if err != nil {
 			// the key parsed when the client was applied, so this is unexpected
@@ -403,56 +469,87 @@ func (self *WgProxy) RemoveClients(addedBefore time.Time, addrs ...netip.Addr) (
 				},
 			},
 		}
+		// program the device outside stateLock (the device is internally
+		// synchronized) so the data path is not blocked while peers are removed
 		if err := self.device.IpcSet(&config); err != nil {
 			returnErr = errors.Join(returnErr, fmt.Errorf("remove client %s: %w", addr, err))
 			continue
 		}
-		delete(self.clients, addr)
-		delete(self.clientAddTimes, addr)
-		if activeTun, ok := self.activeClients[addr]; ok {
+
+		// forget the client and capture any active tun to tear down after the lock
+		var activeTun WgTun
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			delete(self.clients, addr)
+			delete(self.clientAddTimes, addr)
+			if t, ok := self.activeClients[addr]; ok {
+				activeTun = t
+				delete(self.activeClients, addr)
+			}
+		}()
+		if activeTun != nil {
 			activeTun.SetReceive(nil)
 			activeTun.Cancel()
-			delete(self.activeClients, addr)
 		}
 	}
 	return
 }
 
+// activateClient returns the tun for the client at addr, creating or
+// reactivating it as needed. It is on the per-packet wg ingress path (Write), so
+// the fast path — an already-active, live tun — takes only a brief read lock and
+// runs the liveness check and receive-mode re-assert with NO lock held across the
+// per-device calls. This keeps wg ingress for all clients from serializing on one
+// global mutex.
 func (self *WgProxy) activateClient(addr netip.Addr) (WgTun, error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-
-	tun, ok := self.activeClients[addr]
-	if ok {
-		if tun.Active() && tun.UpdateActivity() {
-			// Re-assert wg "receive" mode on each call. The proxy device is
-			// shared per proxy id, so a tun-based call (http/socks) may have
-			// reset it to tun mode via SetReceive(nil). The device's SetReceive
-			// is idempotent when the channel is unchanged, so this is free in
-			// the common case.
-			tun.SetReceive(self.receive)
-			return tun, nil
-		} else {
-			tun.Cancel()
-			tun.SetReceive(nil)
-			delete(self.activeClients, addr)
-		}
+	self.stateLock.RLock()
+	tun := self.activeClients[addr]
+	self.stateLock.RUnlock()
+	if tun != nil && tun.Active() && tun.UpdateActivity() {
+		// Re-assert wg "receive" mode on each call. The proxy device is shared per
+		// proxy id, so a tun-based call (http/socks) may have reset it to tun mode
+		// via SetReceive(nil). The device's SetReceive is idempotent when the
+		// channel is unchanged, so this is free in the common case.
+		tun.SetReceive(self.receive)
+		return tun, nil
 	}
+	return self.activateClientSlow(addr)
+}
 
+// activateClientSlow handles the miss/dead case: it creates the device via
+// client.Tun() WITHOUT holding the state lock (it may do db + device + tun
+// setup). OpenProxyDevice dedups per proxy id and owns the recreate-on-death
+// logic, so concurrent first packets converge on one device and a dead tun is
+// transparently replaced.
+func (self *WgProxy) activateClientSlow(addr netip.Addr) (WgTun, error) {
+	self.stateLock.RLock()
 	client, ok := self.clients[addr]
-	if ok {
-		tun, err := client.Tun()
-		if err == nil {
-			tun.UpdateActivity()
-			tun.SetReceive(self.receive)
-			self.activeClients[addr] = tun
-			return tun, nil
-		} else {
-			return nil, err
-		}
+	self.stateLock.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("No client found for %s.", addr)
 	}
 
-	return nil, fmt.Errorf("No client found for %s.", addr)
+	tun, err := client.Tun()
+	if err != nil {
+		return nil, err
+	}
+	tun.UpdateActivity()
+	tun.SetReceive(self.receive)
+
+	self.stateLock.Lock()
+	// the client may have been removed while the device was being created
+	// (RemoveClients deletes clients[addr] under this lock); if so, do not
+	// publish a tun for it
+	if _, stillClient := self.clients[addr]; !stillClient {
+		self.stateLock.Unlock()
+		tun.SetReceive(nil)
+		tun.Cancel()
+		return nil, fmt.Errorf("No client found for %s.", addr)
+	}
+	self.activeClients[addr] = tun
+	self.stateLock.Unlock()
+	return tun, nil
 }
 
 func (self *WgProxy) MTU() int {
