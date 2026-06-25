@@ -613,8 +613,10 @@ func (self *WgProxy) Read(bufs [][]byte, sizes []int, offset int) (count int, re
 	case <-self.ctx.Done():
 		return 0, fmt.Errorf("Done.")
 	case packet := <-self.receive:
-		// defer connect.MessagePoolReturn(packet)
+		// ownership transferred to us on the successful send; copy into the
+		// device buffer and return the shared packet to the pool.
 		n := copy(bufs[0][offset:], packet)
+		connect.MessagePoolReturn(packet)
 		if n < len(packet) {
 			returnErr = errors.Join(returnErr, PacketTooLargeError)
 		}
@@ -629,7 +631,17 @@ func (self *WgProxy) Close() error {
 	self.cancel()
 	self.device.Close()
 	self.closeActiveClients()
-	return nil
+	// the senders are stopped (SetReceive(nil) + Cancel in closeActiveClients);
+	// drain any packets still queued on the receive channel and return them to
+	// the pool, since ownership transferred to us on send.
+	for {
+		select {
+		case packet := <-self.receive:
+			connect.MessagePoolReturn(packet)
+		default:
+			return nil
+		}
+	}
 }
 
 func (self *WgProxy) closeActiveClients() {
