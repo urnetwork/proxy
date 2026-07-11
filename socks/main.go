@@ -397,6 +397,9 @@ func login(ctx context.Context, apiURL, userAuth, password string) (string, erro
 	)
 
 	res := <-resChan
+	if res.err != nil {
+		return "", res.err
+	}
 	if res.res.Error != nil {
 		return "", errors.New(res.res.Error.Message)
 	}
