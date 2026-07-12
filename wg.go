@@ -433,65 +433,97 @@ func (self *WgProxy) RemoveClients(addedBefore time.Time, addrs ...netip.Addr) (
 	self.controlLock.Lock()
 	defer self.controlLock.Unlock()
 
-	for _, addr := range addrs {
-		// decide removal eligibility under the lock, then release it before the
-		// device write
-		var client *WgClient
-		func() {
-			self.stateLock.RLock()
-			defer self.stateLock.RUnlock()
-			c, ok := self.clients[addr]
+	// decide removal eligibility under the lock, then program the device outside it
+	type removal struct {
+		addr       netip.Addr
+		peerConfig wgtypes.PeerConfig
+	}
+	var removals []removal
+	func() {
+		self.stateLock.RLock()
+		defer self.stateLock.RUnlock()
+		for _, addr := range addrs {
+			client, ok := self.clients[addr]
 			if !ok {
-				return
+				continue
 			}
 			if addTime, ok := self.clientAddTimes[addr]; ok && !addTime.Before(addedBefore) {
 				// applied at or after the cutoff: keep (grace window)
-				return
+				continue
 			}
-			client = c
-		}()
-		if client == nil {
-			continue
-		}
-
-		publicKey, err := wgtypes.ParseKey(client.PublicKey)
-		if err != nil {
-			// the key parsed when the client was applied, so this is unexpected
-			returnErr = errors.Join(returnErr, fmt.Errorf("remove client %s: %w", addr, err))
-			continue
-		}
-		config := wgtypes.Config{
-			Peers: []wgtypes.PeerConfig{
-				{
+			publicKey, err := wgtypes.ParseKey(client.PublicKey)
+			if err != nil {
+				// the key parsed when the client was applied, so this is unexpected
+				returnErr = errors.Join(returnErr, fmt.Errorf("remove client %s: %w", addr, err))
+				continue
+			}
+			removals = append(removals, removal{
+				addr: addr,
+				peerConfig: wgtypes.PeerConfig{
 					PublicKey:  publicKey,
 					Remove:     true,
 					UpdateOnly: true,
 				},
-			},
+			})
+		}
+	}()
+	if len(removals) == 0 {
+		return
+	}
+
+	// forget the clients whose peers were removed, capturing any active tuns to
+	// tear down once the lock is released
+	var activeTuns []WgTun
+	forget := func(batch []removal) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		for _, entry := range batch {
+			delete(self.clients, entry.addr)
+			delete(self.clientAddTimes, entry.addr)
+			if t, ok := self.activeClients[entry.addr]; ok {
+				activeTuns = append(activeTuns, t)
+				delete(self.activeClients, entry.addr)
+			}
+		}
+	}
+
+	batchSize := self.settings.ClientBatchSize
+	if batchSize <= 0 {
+		batchSize = len(removals)
+	}
+
+	// peers are removed in batches, mirroring `addClients`. One device transaction
+	// per peer would hold controlLock across thousands of serial IpcSet calls when
+	// a reconcile pass drops a large stale set, stalling every concurrent
+	// AddClients (a new client's first connection) behind it.
+	for start := 0; start < len(removals); start += batchSize {
+		batch := removals[start:min(start+batchSize, len(removals))]
+		peers := make([]wgtypes.PeerConfig, 0, len(batch))
+		for _, entry := range batch {
+			peers = append(peers, entry.peerConfig)
 		}
 		// program the device outside stateLock (the device is internally
 		// synchronized) so the data path is not blocked while peers are removed
-		if err := self.device.IpcSet(&config); err != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("remove client %s: %w", addr, err))
-			continue
-		}
-
-		// forget the client and capture any active tun to tear down after the lock
-		var activeTun WgTun
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			delete(self.clients, addr)
-			delete(self.clientAddTimes, addr)
-			if t, ok := self.activeClients[addr]; ok {
-				activeTun = t
-				delete(self.activeClients, addr)
+		config := wgtypes.Config{Peers: peers}
+		if err := self.device.IpcSet(&config); err == nil {
+			forget(batch)
+		} else {
+			// the device applies peers in order and stops at the first error,
+			// so retry each peer individually to remove the rest of the batch
+			for _, entry := range batch {
+				config := wgtypes.Config{Peers: []wgtypes.PeerConfig{entry.peerConfig}}
+				if err := self.device.IpcSet(&config); err == nil {
+					forget([]removal{entry})
+				} else {
+					returnErr = errors.Join(returnErr, fmt.Errorf("remove client %s: %w", entry.addr, err))
+				}
 			}
-		}()
-		if activeTun != nil {
-			activeTun.SetReceive(nil)
-			activeTun.Cancel()
 		}
+	}
+
+	for _, activeTun := range activeTuns {
+		activeTun.SetReceive(nil)
+		activeTun.Cancel()
 	}
 	return
 }

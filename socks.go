@@ -2,168 +2,152 @@ package proxy
 
 import (
 	"context"
-	// "crypto/tls"
-	// "encoding/base64"
-	"errors"
 	"fmt"
 	"net"
-	// "net/http"
-	// "net/netip"
-	// "os"
-	"io"
-	"strings"
-	"syscall"
+	"sync"
 	"time"
-	// "sync"
-
-	// "github.com/elazarl/goproxy"
-	socks5 "github.com/things-go/go-socks5"
-	"github.com/things-go/go-socks5/statute"
 
 	"github.com/urnetwork/connect"
 )
 
-type SocksRequest = *socks5.Request
+// SocksRequest is the parsed SOCKS5 request passed to ConnectDialWithRequest.
+type SocksRequest = *Request
 
-type SocksProxy struct {
-	// Log, when set, receives socks proxy logging. nil resolves to
-	// `connect.DefaultLogger()`.
+// SocksProxySettings configures a SocksProxy. Take DefaultSocksProxySettings and
+// adjust it; nothing is left to a zero value meaning "default".
+type SocksProxySettings struct {
+	// Log receives socks proxy logging. nil resolves to `connect.DefaultLogger()`.
 	Log connect.Logger
 
-	ProxyReadTimeout       time.Duration
-	ProxyWriteTimeout      time.Duration
+	// ProxyReadTimeout bounds each read on the data path. A tunnel idle for
+	// longer is torn down, and it gates SOCKS half-close. See `SocksProxySettings`.
+	ProxyReadTimeout time.Duration
+	// ProxyWriteTimeout bounds each write.
+	ProxyWriteTimeout time.Duration
+	// HandshakeTimeout bounds negotiation and request parsing.
+	HandshakeTimeout time.Duration
+
+	// AssociateIdleTimeout reclaims a UDP flow idle in both directions.
+	AssociateIdleTimeout time.Duration
+	// AssociateMaxFlows caps concurrent UDP flows per association. This bounds how
+	// much memory one client can pin, since each flow holds a buffer and an egress
+	// endpoint for its life.
+	AssociateMaxFlows int
+	// MaxDatagramSize is the largest UDP payload the associate relay carries.
+	// Larger datagrams are dropped, never truncated.
+	MaxDatagramSize int
+
+	// StatsLogInterval is how often the data path's counters are flushed to the
+	// log (only when they have changed). The data path itself never logs. Zero
+	// disables the flush.
+	StatsLogInterval time.Duration
+}
+
+func DefaultSocksProxySettings() *SocksProxySettings {
+	return &SocksProxySettings{
+		// read exceeds write deliberately: a read is an idle tunnel waiting for
+		// traffic, while a write that cannot drain means the peer stopped reading
+		ProxyReadTimeout:  30 * time.Second,
+		ProxyWriteTimeout: 15 * time.Second,
+		HandshakeTimeout:  30 * time.Second,
+
+		AssociateIdleTimeout: 60 * time.Second,
+		AssociateMaxFlows:    64,
+		MaxDatagramSize:      4096,
+
+		StatsLogInterval: DefaultStatsLogInterval,
+	}
+}
+
+type SocksProxy struct {
+	settings *SocksProxySettings
+
+	// server is built ONCE, on first use, and shared across every ListenAndServe
+	// (the caller runs one per address family). Building it per call would give each
+	// listener its own Stats, so the counters would be split and unreachable — and
+	// counters are the only observability the data path has, since it never logs.
+	//
+	// Building it lazily rather than in the constructor is what lets a caller adjust
+	// Settings() after construction and still have it take effect.
+	serverOnce   sync.Once
+	server       *socksServer
+	statsLogOnce sync.Once
+
 	ConnectDialWithRequest func(ctx context.Context, r SocksRequest, network string, addr string) (net.Conn, error)
 	ValidUser              func(user string, password string, userAddr string) bool
 }
 
-func NewSocksProxy() *SocksProxy {
-	return &SocksProxy{}
+func NewSocksProxy(settings *SocksProxySettings) *SocksProxy {
+	return &SocksProxy{
+		settings: settings,
+	}
+}
+
+func NewSocksProxyWithDefaults() *SocksProxy {
+	return NewSocksProxy(DefaultSocksProxySettings())
+}
+
+func (self *SocksProxy) Settings() *SocksProxySettings {
+	return self.settings
+}
+
+func (self *SocksProxy) logger() connect.Logger {
+	if self.settings.Log != nil {
+		return self.settings.Log
+	}
+	return connect.DefaultLogger()
+}
+
+// Stats returns the socks data path's counters. Nothing on that path logs — a
+// client picks the rate, so logging would let it drive unbounded server I/O — so
+// these counters are how drops, dial failures and oversize datagrams are observed.
+func (self *SocksProxy) Stats() SocksStatsSnapshot {
+	return self.ensureServer().Stats().Snapshot()
+}
+
+// ensureServer builds the socks5 server on first use. Settings are read here, so
+// a caller may adjust Settings() any time before serving starts.
+func (self *SocksProxy) ensureServer() *socksServer {
+	self.serverOnce.Do(func() {
+		self.server = self.newServer()
+	})
+	return self.server
+}
+
+// newServer builds the socks5 protocol server. The callbacks recover panics via
+// connect.HandleError, matching the behavior the proxy has always had.
+func (self *SocksProxy) newServer() *socksServer {
+	server := newSocksServer(self.settings)
+	server.Log = self.logger()
+	server.Dial = func(ctx context.Context, r *Request, network string, addr string) (net.Conn, error) {
+		return connect.HandleError2(func() (net.Conn, error) {
+			return self.ConnectDialWithRequest(ctx, r, network, addr)
+		}, func() (net.Conn, error) {
+			return nil, fmt.Errorf("Unexpected error")
+		})
+	}
+	server.ValidUser = func(user string, password string, userAddr string) bool {
+		if self.ValidUser == nil {
+			return false
+		}
+		return connect.HandleError1(func() bool {
+			return self.ValidUser(user, password, userAddr)
+		}, func() bool {
+			return false
+		})
+	}
+	return server
 }
 
 func (self *SocksProxy) ListenAndServe(ctx context.Context, network string, addr string) error {
+	server := self.ensureServer()
 
-	socksServer := socks5.NewServer(
-		socks5.WithLogger(self),
-		socks5.WithCredential(self),
-		socks5.WithResolver(self),
-		socks5.WithRule(socks5.NewPermitConnAndAss()),
-		socks5.WithDialAndRequest(func(ctx context.Context, network string, addr string, r *socks5.Request) (net.Conn, error) {
-			return connect.HandleError2(func() (net.Conn, error) {
-				return self.ConnectDialWithRequest(ctx, r, network, addr)
-			}, func() (net.Conn, error) {
-				return nil, fmt.Errorf("Unexpected error")
-			})
-		}),
-		socks5.WithConnectHandle(func(ctx context.Context, writer io.Writer, r SocksRequest) error {
-			return connect.HandleError1(func() error {
-				return self.connectHandle(ctx, writer, r)
-			}, func() error {
-				return fmt.Errorf("Unexpected error")
-			})
-		}),
-	)
-
-	listenConfig := net.ListenConfig{}
-
-	l, err := listenConfig.Listen(
-		ctx,
-		network,
-		addr,
-	)
-	if err != nil {
-		return err
-	}
-
-	runCtx, runCancel := context.WithCancel(ctx)
-	defer runCancel()
-
-	go connect.HandleError(func() {
-		defer l.Close()
-		select {
-		case <-runCtx.Done():
-		}
-	})
-
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			return err
-		}
+	// one flusher, however many address families are served
+	self.statsLogOnce.Do(func() {
 		go connect.HandleError(func() {
-			socksServer.ServeConn(conn)
+			logStatsPeriodically(ctx, self.logger(), "[socks]", self.settings.StatsLogInterval, self.Stats)
 		})
-	}
-}
-
-func (self *SocksProxy) connectHandle(ctx context.Context, writer io.Writer, r SocksRequest) error {
-	clientConn, _ := writer.(net.Conn)
-	proxyConn, err := self.ConnectDialWithRequest(ctx, r, "tcp", r.DestAddr.String())
-	if err != nil {
-		resp := mapDialErrorToSocksReply(err)
-		socks5.SendReply(writer, resp, nil)
-		return err
-	}
-	handleCtx, handleCancel := context.WithCancel(ctx)
-	defer handleCancel()
-	go connect.HandleError(func() {
-		defer proxyConn.Close()
-		if clientConn != nil {
-			defer clientConn.Close()
-		}
-		select {
-		case <-handleCtx.Done():
-		}
 	})
 
-	if err := socks5.SendReply(writer, statute.RepSuccess, proxyConn.LocalAddr()); err != nil {
-		return err
-	}
-
-	return copyRw(handleCtx, handleCancel, r.Reader, writer, proxyConn, proxyConn, self.ProxyReadTimeout, self.ProxyWriteTimeout)
-}
-
-// socks.Logger
-func (self *SocksProxy) Errorf(format string, args ...any) {
-	log := self.Log
-	if log == nil {
-		log = connect.DefaultLogger()
-	}
-	log.Errorf("[socks]"+format, args...)
-}
-
-// socks.CredentialStore
-func (self *SocksProxy) Valid(username string, password string, userAddr string) bool {
-	return connect.HandleError1(func() bool {
-		return self.ValidUser(username, password, userAddr)
-	}, func() bool {
-		return false
-	})
-}
-
-// socks.NameResolver
-func (self *SocksProxy) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
-	// Names are resolved by the proxied dialer. Returning nil preserves the FQDN
-	// in the request address instead of replacing it with a local resolver result.
-	return ctx, nil, nil
-}
-
-func mapDialErrorToSocksReply(err error) uint8 {
-	switch {
-	case errors.Is(err, syscall.ECONNREFUSED):
-		return statute.RepConnectionRefused
-	case errors.Is(err, syscall.ENETUNREACH):
-		return statute.RepNetworkUnreachable
-	case errors.Is(err, syscall.EHOSTUNREACH):
-		return statute.RepHostUnreachable
-	}
-	// Fallback to substring matching for errors not wrapped as syscall codes
-	// (e.g. gVisor tcpip errors surfaced through gonet).
-	msg := err.Error()
-	if strings.Contains(msg, "refused") {
-		return statute.RepConnectionRefused
-	}
-	if strings.Contains(msg, "network is unreachable") {
-		return statute.RepNetworkUnreachable
-	}
-	return statute.RepHostUnreachable
+	return server.ListenAndServe(ctx, network, addr)
 }

@@ -41,7 +41,7 @@ func TestHttpProxyForwardsRequestMetadataAndBody(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	proxy := NewHttpProxy()
+	proxy := NewHttpProxy(testHttpSettings())
 	proxy.ConnectDialWithRequest = func(r *http.Request, network string, addr string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(r.Context(), network, addr)
@@ -82,8 +82,8 @@ func TestHttpProxyForwardsRequestMetadataAndBody(t *testing.T) {
 }
 
 func TestHttpProxyRejectsOversizedRequestBody(t *testing.T) {
-	proxy := NewHttpProxy()
-	proxy.MaxHttpBodyBytes = 3
+	proxy := NewHttpProxy(testHttpSettings())
+	proxy.Settings().MaxHttpBodyBytes = 3
 	proxy.ConnectDialWithRequest = func(r *http.Request, network string, addr string) (net.Conn, error) {
 		t.Fatalf("dial should not be called for oversized request")
 		return nil, context.Canceled
@@ -114,7 +114,7 @@ func TestHttpProxyConnectTunnel(t *testing.T) {
 		_, _ = conn.Write([]byte("pong"))
 	})
 
-	proxy := NewHttpProxy()
+	proxy := NewHttpProxy(testHttpSettings())
 	proxy.ConnectDialWithRequest = func(r *http.Request, network string, addr string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(r.Context(), "tcp", backendAddr)

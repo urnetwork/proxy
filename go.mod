@@ -6,7 +6,6 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/gopacket v1.1.19
 	github.com/samber/lo v1.50.0
-	github.com/things-go/go-socks5 v0.1.1
 	github.com/urfave/cli/v2 v2.27.7
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/userwireguard v0.0.0

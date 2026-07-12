@@ -91,7 +91,7 @@ func startSocksProxy(t *testing.T, dial func(context.Context, SocksRequest, stri
 
 	addr := freeTCPAddr(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	proxy := NewSocksProxy()
+	proxy := NewSocksProxy(testSocksSettings())
 	proxy.ValidUser = func(user string, password string, userAddr string) bool {
 		return true
 	}
