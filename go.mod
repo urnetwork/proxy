@@ -3,17 +3,15 @@ module github.com/urnetwork/proxy
 go 1.26.3
 
 require (
+	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/gopacket v1.1.19
-	github.com/samber/lo v1.50.0
-	github.com/urfave/cli/v2 v2.27.7
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/userwireguard v0.0.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 )
 
 require (
-	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
@@ -34,10 +32,8 @@ require (
 	github.com/pion/turn/v5 v5.0.10 // indirect
 	github.com/pion/webrtc/v4 v4.2.15 // indirect
 	github.com/quic-go/quic-go v0.60.0 // indirect
-	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/urnetwork/glog v0.0.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/exp v0.0.0-20260611194520-c48552f49976 // indirect
 	golang.org/x/net v0.56.0 // indirect
