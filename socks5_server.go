@@ -34,6 +34,7 @@ type socksServer struct {
 	Log connect.Logger
 
 	stats SocksStats
+	drain drainState
 }
 
 func newSocksServer(settings *SocksProxySettings) *socksServer {
@@ -56,6 +57,11 @@ func (s *socksServer) ListenAndServe(ctx context.Context, network, addr string) 
 	if err != nil {
 		return err
 	}
+	// a drain that already began closes the listener; do not serve it
+	if !s.drain.registerListener(l) {
+		return nil
+	}
+	defer s.drain.unregisterListener(l)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -67,20 +73,57 @@ func (s *socksServer) ListenAndServe(ctx context.Context, network, addr string) 
 	for {
 		conn, err := l.Accept()
 		if err != nil {
+			// shutdown closes the listener out from under Accept; a clean exit
+			if runCtx.Err() != nil {
+				return nil
+			}
+			if s.drain.Draining() {
+				// drain closed the listener. In-flight connections keep
+				// relaying under runCtx, so do NOT return yet — returning
+				// would run the deferred cancel and kill them. Block until
+				// the caller ends the drain by canceling ctx, which remains
+				// the hard teardown.
+				select {
+				case <-runCtx.Done():
+				}
+				return nil
+			}
 			return err
+		}
+		// Account the accepted connection before handing it to a goroutine.
+		// Drain and admission share one lock, so WaitIdle cannot observe zero
+		// in the scheduling gap and return just before this session starts.
+		if !s.drain.tryEnter() {
+			conn.Close()
+			continue
 		}
 		go func() {
 			// A connection that fails to serve is a normal, client-driven outcome
 			// (a bad handshake, an unreachable destination, a client that hung up).
 			// Logging it would let a client drive unbounded log I/O, so it is not
 			// logged; ServeConn records what it needs in SocksStats.
-			s.ServeConn(runCtx, conn)
+			s.serveConn(runCtx, conn)
 		}()
 	}
 }
 
 // ServeConn serves a single SOCKS5 connection to completion and closes it.
 func (s *socksServer) ServeConn(ctx context.Context, conn net.Conn) (err error) {
+	if !s.drain.tryEnter() {
+		conn.Close()
+		return errors.New("socks5: proxy is draining")
+	}
+	return s.serveConn(ctx, conn)
+}
+
+// serveConn serves a connection whose drain admission has already been
+// counted. ListenAndServe admits synchronously before goroutine handoff;
+// direct ServeConn callers are admitted by the wrapper above.
+func (s *socksServer) serveConn(ctx context.Context, conn net.Conn) (err error) {
+	// One session per connection, so connection-scoped active tracking covers
+	// CONNECT relays and UDP associations (both block in here for their whole
+	// life).
+	defer s.drain.exit()
 	defer conn.Close()
 	defer func() {
 		if r := recover(); r != nil {

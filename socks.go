@@ -105,6 +105,25 @@ func (self *SocksProxy) Stats() SocksStatsSnapshot {
 	return self.ensureServer().Stats().Snapshot()
 }
 
+// Drain begins a graceful drain (PROXYDRAIN1.md §3.2): listeners close while
+// in-flight connections (CONNECT relays and UDP associations) keep relaying.
+// The caller waits with `WaitIdle` (or a deadline) and then cancels the serve
+// ctx, which remains the hard teardown for stragglers.
+func (self *SocksProxy) Drain() {
+	self.ensureServer().drain.Drain()
+}
+
+// ActiveCount reports the number of in-flight connections.
+func (self *SocksProxy) ActiveCount() int {
+	return self.ensureServer().drain.ActiveCount()
+}
+
+// WaitIdle blocks until a drain has begun and no connections are active, or
+// ctx is done. It returns true when idle was reached.
+func (self *SocksProxy) WaitIdle(ctx context.Context) bool {
+	return self.ensureServer().drain.WaitIdle(ctx)
+}
+
 // ensureServer builds the socks5 server on first use. Settings are read here, so
 // a caller may adjust Settings() any time before serving starts.
 func (self *SocksProxy) ensureServer() *socksServer {

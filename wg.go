@@ -36,6 +36,13 @@ type WgClient struct {
 	PresharedKey string
 	ClientIpv4   netip.Addr
 	Tun          func() (WgTun, error)
+	// Endpoint, when set, seeds the peer's endpoint so the SERVER can
+	// initiate a handshake (wireguard is symmetric) instead of waiting for
+	// the client's dead-session timers. Used by the deploy endpoint handoff
+	// (PROXYDRAIN1.md §3.4): the drained instance exports each peer's learned
+	// endpoint and the replacement instance applies it here. nil leaves the
+	// endpoint to be learned from the client's next packet, as before.
+	Endpoint *net.UDPAddr
 }
 
 type WgTun interface {
@@ -424,6 +431,133 @@ func (self *WgProxy) ClientCount() int {
 	return len(self.clients)
 }
 
+// WgPeerStatus is a registered client's live peer session facts: the endpoint
+// the device has learned (or was seeded with) and the last completed
+// handshake. This is the export side of the deploy endpoint handoff
+// (PROXYDRAIN1.md §3.4).
+type WgPeerStatus struct {
+	ClientIpv4 netip.Addr
+	PublicKey  string
+	// Endpoint is the peer's current endpoint; nil when the device has never
+	// seen (or been seeded with) one.
+	Endpoint *net.UDPAddr
+	// LastHandshake is zero when the peer has never completed a handshake.
+	LastHandshake time.Time
+}
+
+// PeerStatuses reports the live peer status for every registered client,
+// keyed by client ipv4. Clients whose peer the device does not report (e.g.
+// registered concurrently with the read) are omitted.
+func (self *WgProxy) PeerStatuses() (map[netip.Addr]*WgPeerStatus, error) {
+	wgDevice, err := self.device.IpcGet()
+	if err != nil {
+		return nil, err
+	}
+
+	publicKeyClientIpv4s := func() map[string]netip.Addr {
+		self.stateLock.RLock()
+		defer self.stateLock.RUnlock()
+		publicKeyClientIpv4s := make(map[string]netip.Addr, len(self.clients))
+		for addr, client := range self.clients {
+			publicKeyClientIpv4s[client.PublicKey] = addr
+		}
+		return publicKeyClientIpv4s
+	}()
+
+	peerStatuses := map[netip.Addr]*WgPeerStatus{}
+	for _, wgPeer := range wgDevice.Peers {
+		publicKey := wgPeer.PublicKey.String()
+		addr, ok := publicKeyClientIpv4s[publicKey]
+		if !ok {
+			continue
+		}
+		peerStatuses[addr] = &WgPeerStatus{
+			ClientIpv4:    addr,
+			PublicKey:     publicKey,
+			Endpoint:      wgPeer.Endpoint,
+			LastHandshake: wgPeer.LastHandshakeTime,
+		}
+	}
+	return peerStatuses, nil
+}
+
+// SeedEndpoints sets the endpoint on the peers of already registered
+// clients (UpdateOnly: an endpoint for an unregistered client is skipped,
+// never creating a peer). Returns the number of endpoints applied. This is
+// the replacement instance's endpoint restore in the deploy handoff
+// (PROXYDRAIN1.md §3.4); pair with `InitiateHandshake`.
+func (self *WgProxy) SeedEndpoints(endpoints map[netip.Addr]*net.UDPAddr) (int, error) {
+	self.controlLock.Lock()
+	defer self.controlLock.Unlock()
+
+	peers := []wgtypes.PeerConfig{}
+	func() {
+		self.stateLock.RLock()
+		defer self.stateLock.RUnlock()
+		for addr, endpoint := range endpoints {
+			if endpoint == nil {
+				continue
+			}
+			client, ok := self.clients[addr]
+			if !ok {
+				continue
+			}
+			publicKey, err := wgtypes.ParseKey(client.PublicKey)
+			if err != nil {
+				continue
+			}
+			peers = append(peers, wgtypes.PeerConfig{
+				PublicKey:  publicKey,
+				UpdateOnly: true,
+				Endpoint:   endpoint,
+			})
+		}
+	}()
+	if len(peers) == 0 {
+		return 0, nil
+	}
+
+	config := wgtypes.Config{
+		ReplacePeers: false,
+		Peers:        peers,
+	}
+	if err := self.device.IpcSet(&config); err != nil {
+		return 0, err
+	}
+	return len(peers), nil
+}
+
+// InitiateHandshake sends a handshake initiation to the client's peer. The
+// peer must have an endpoint (seeded via `WgClient.Endpoint` or learned from
+// a packet) for the initiation to be sendable. One call is enough: the device
+// arms its own handshake retry timers (RekeyTimeout pace, RekeyAttemptTime
+// bound), and repeated calls are internally rate limited.
+//
+// This is the replacement instance's half of the deploy endpoint handoff
+// (PROXYDRAIN1.md §3.4): initiations sent before the deploy's conntrack flush
+// are harmlessly blackholed (the client's reply still DNATs to the old
+// instance); the retry that lands after the flush re-establishes the session
+// in ~1 RTT, instead of waiting out the client's dead-session timers.
+func (self *WgProxy) InitiateHandshake(addr netip.Addr) error {
+	client := func() *WgClient {
+		self.stateLock.RLock()
+		defer self.stateLock.RUnlock()
+		return self.clients[addr]
+	}()
+	if client == nil {
+		return fmt.Errorf("no client for %s", addr)
+	}
+	publicKey, err := wgtypes.ParseKey(client.PublicKey)
+	if err != nil {
+		return fmt.Errorf("parse public key for %s: %w", addr, err)
+	}
+	peer := self.device.LookupPeer(device.NoisePublicKey(publicKey))
+	if peer == nil {
+		return fmt.Errorf("no peer for %s", addr)
+	}
+	return peer.SendHandshakeInitiation(false)
+}
+
 // RemoveClients removes the peers for the given addresses from the device and
 // forgets the clients. Only clients whose config was last applied before
 // `addedBefore` are removed: a reconcile pass computes removals from a db
@@ -754,6 +888,9 @@ func createPeerConfig(addr netip.Addr, client *WgClient) (wgtypes.PeerConfig, er
 				Mask: net.CIDRMask(32, 32),
 			},
 		},
+		// nil leaves the device's endpoint state unchanged (learned from the
+		// client's packets); set only by the deploy endpoint handoff
+		Endpoint: client.Endpoint,
 	}, nil
 }
 

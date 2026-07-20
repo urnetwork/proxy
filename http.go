@@ -81,6 +81,7 @@ func DefaultHttpProxySettings() *HttpProxySettings {
 type HttpProxy struct {
 	settings *HttpProxySettings
 	stats    HttpStats
+	drain    drainState
 
 	ConnectDialWithRequest func(r *http.Request, network string, addr string) (net.Conn, error)
 	GetTlsConfigForClient  func(*tls.ClientHelloInfo) (*tls.Config, error)
@@ -106,6 +107,25 @@ func (self *HttpProxy) Settings() *HttpProxySettings {
 // also flushed to the log on StatsLogInterval.
 func (self *HttpProxy) Stats() HttpStatsSnapshot {
 	return self.stats.Snapshot()
+}
+
+// Drain begins a graceful drain (PROXYDRAIN1.md §3.2): listeners close, new
+// requests are refused with 503, and in-flight requests and tunnels keep
+// relaying. The caller waits with `WaitIdle` (or a deadline) and then cancels
+// the serve ctx, which remains the hard teardown for stragglers.
+func (self *HttpProxy) Drain() {
+	self.drain.Drain()
+}
+
+// ActiveCount reports the number of in-flight requests and tunnels.
+func (self *HttpProxy) ActiveCount() int {
+	return self.drain.ActiveCount()
+}
+
+// WaitIdle blocks until a drain has begun and no requests or tunnels are
+// active, or ctx is done. It returns true when idle was reached.
+func (self *HttpProxy) WaitIdle(ctx context.Context) bool {
+	return self.drain.WaitIdle(ctx)
 }
 
 func (self *HttpProxy) logger() connect.Logger {
@@ -134,6 +154,11 @@ func (self *HttpProxy) ListenAndServe(ctx context.Context, network string, addr 
 	if err != nil {
 		return err
 	}
+	// a drain that already began closes the listener; do not serve it
+	if !self.drain.registerListener(l) {
+		return nil
+	}
+	defer self.drain.unregisterListener(l)
 
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
@@ -171,7 +196,22 @@ func (self *HttpProxy) ListenAndServe(ctx context.Context, network string, addr 
 		logStatsPeriodically(runCtx, self.logger(), "[http]", self.settings.StatsLogInterval, self.Stats)
 	})
 
-	return httpServer.Serve(l)
+	err = httpServer.Serve(l)
+	// shutdown closes the listener out from under Serve; a clean exit
+	if runCtx.Err() != nil {
+		return nil
+	}
+	if self.drain.Draining() {
+		// drain closed the listener. In-flight requests and tunnels keep
+		// relaying under runCtx, so do NOT return yet — returning would run
+		// the deferred runCancel and kill them. Block until the caller ends
+		// the drain by canceling ctx, which remains the hard teardown.
+		select {
+		case <-runCtx.Done():
+		}
+		return nil
+	}
+	return err
 }
 
 func (self *HttpProxy) ListenAndServeTls(ctx context.Context, network string, addr string) error {
@@ -190,6 +230,11 @@ func (self *HttpProxy) ListenAndServeTls(ctx context.Context, network string, ad
 	if err != nil {
 		return err
 	}
+	// see `ListenAndServe`: a drain that already began closes the listener
+	if !self.drain.registerListener(l) {
+		return nil
+	}
+	defer self.drain.unregisterListener(l)
 
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
@@ -217,10 +262,33 @@ func (self *HttpProxy) ListenAndServeTls(ctx context.Context, network string, ad
 		}
 	})
 
-	return httpServer.ServeTLS(l, "", "")
+	err = httpServer.ServeTLS(l, "", "")
+	// see `ListenAndServe`: shutdown is a clean exit, and a drain must not
+	// return (and so cancel runCtx) while in-flight tunnels are relaying
+	if runCtx.Err() != nil {
+		return nil
+	}
+	if self.drain.Draining() {
+		select {
+		case <-runCtx.Done():
+		}
+		return nil
+	}
+	return err
 }
 
 func (self *HttpProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Refuse NEW requests during a drain — the accept side is already closed,
+	// so these are requests pipelined on a kept-alive connection. In-flight
+	// requests and established tunnels are unaffected; `Connection: close`
+	// stops the client from parking more requests on this connection.
+	if !self.drain.tryEnter() {
+		w.Header().Set("Connection", "close")
+		http.Error(w, "proxy is draining", http.StatusServiceUnavailable)
+		return
+	}
+	defer self.drain.exit()
+
 	// `http.ErrAbortHandler` is how a handler tells net/http to drop a response
 	// whose head is already on the wire. `connect.HandleError` recovers every
 	// panic, so it would swallow the sentinel and let a truncated body be framed
