@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 // socksDialFunc dials an egress connection for a request. network is "tcp" or "udp".
