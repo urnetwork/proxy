@@ -16,9 +16,9 @@ import (
 
 	"github.com/docopt/docopt-go"
 	gojwt "github.com/golang-jwt/jwt/v5"
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/connect/protocol"
-	"github.com/urnetwork/proxy"
+	"github.com/urnetwork/connect/v2026"
+	"github.com/urnetwork/connect/v2026/protocol"
+	"github.com/urnetwork/proxy/v2026"
 )
 
 // this value is set via the linker, e.g.
