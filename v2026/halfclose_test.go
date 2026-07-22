@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 // halfCloseBackend reads the request until the peer's write side closes, and only
