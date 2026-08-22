@@ -22,7 +22,7 @@ import (
 // exercise the real, current text/literals rather than a copy that could
 // drift from it.
 
-// usageFromSource extracts the literal `usage := \`...\`` doc string from
+// usageFromSource extracts the literal `usage := \`...\` doc string from
 // main.go.
 func usageFromSource(t *testing.T) string {
 	t.Helper()
