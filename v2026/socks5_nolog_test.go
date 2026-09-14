@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 // countingLogger records everything written to it. Anything a client can drive at
