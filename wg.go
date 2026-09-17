@@ -20,9 +20,17 @@ import (
 	"github.com/urnetwork/userwireguard/logger"
 )
 
-// FIXME currently the client ipv4 is threaded to the egress providers
-//       this can allow tracing a single client ipv4 across multiple providers
-//       it should be natted to a standard ipv4
+// The client ipv4 below is the peer's tunnel address inside this server. It is
+// NOT what reaches the egress providers: `server/proxy.ProxyDevice` substitutes
+// a per-device address from connect's local pool on the way out and restores
+// this one on the way back (see its natAddr, and connect.RewriteIpv4Source).
+//
+// That rewrite is load-bearing rather than cosmetic. A peer's tunnel address is
+// allocated from a durable pool and written into its wg config, so threading it
+// through unmodified made it stable across sessions AND identical at every
+// provider in the peer's window -- which let colluding providers tell that
+// those flows belonged to one client, defeating the multi-provider window for
+// this path alone. Threat model §9.4.
 
 var DidNotSendError = errors.New("did not send")
 var PacketTooLargeError = errors.New("packet too large for buffer")
