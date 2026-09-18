@@ -1,6 +1,6 @@
 package main
 
-import "github.com/urnetwork/connect"
+import "github.com/urnetwork/connect/v2026"
 
 type FindProvidersArgs struct {
 	LocationId       *connect.Id `json:"location_id,omitempty"`
