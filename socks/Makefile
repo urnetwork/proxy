@@ -1,6 +1,6 @@
 
 
-all: init clean build
+all: clean build
 
 clean:
 	rm -rf build
@@ -19,7 +19,3 @@ build:
 	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/windows/arm64/
 	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/windows/amd64/
 	COPYFILE_DISABLE=1 tar -czf build/proxy-socks.tar.gz -C build linux darwin windows
-
-init:
-	go clean -cache
-	go clean -modcache
