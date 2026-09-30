@@ -30,9 +30,12 @@ Replace `<your-auth>` and `<your-password>` with your VPN authentication details
 - `--region`: *(Optional)* Region within the country.
 - `--city`: *(Optional)* Specific city to connect through.
 - `--provider-id`: *(Optional)* Specific provider ID to connect to.
-- `--addr`: *(Optional)* Bind address for the proxy server (default is `:9999`).
-- `--api-url`: *(Optional)* Custom API URL (default is `https://api.prod.ur.network`).
-- `--platform-url`: *(Optional)* Custom platform URL (default is `wss://connect.prod.ur.network`).
+- `--addr`: *(Optional)* Bind address for the proxy server (default is `127.0.0.1:9999`, loopback only). A non-loopback address requires `--socks-user` and `--socks-password`. See [Using the proxy from containers or other hosts](#using-the-proxy-from-containers-or-other-hosts).
+- `--socks-user`, `--socks-password`: *(Optional)* SOCKS5 username and password clients must send. Required when `--addr` is not a loopback address.
+- `--api-url`: *(Optional)* Custom API URL (default is `https://api.bringyour.com`).
+- `--platform-url`: *(Optional)* Custom platform URL (default is `wss://connect.bringyour.com`).
+
+Each option can also be set with an environment variable: `ADDR`, `USER_AUTH`, `PASSWORD`, `PROVIDER_ID`, `CITY`, `COUNTRY`, `REGION`, `SOCKS_USER`, `SOCKS_PASSWORD`, `API_URL`, `PLATFORM_URL`.
 
 ### Example: Connecting via Provider ID
 
@@ -51,6 +54,33 @@ After starting the proxy server:
 3. Save the settings.
 
 All your network traffic will now be routed through the VPN via the proxy.
+
+## Using the proxy from containers or other hosts
+
+By default the proxy listens on `127.0.0.1:9999`, which is reachable only from
+the same network namespace. Inside a Docker container `127.0.0.1` is the
+container's own loopback, not the host, so a client such as tun2proxy or
+tun2socks started with `--proxy socks5://127.0.0.1:9999` in its own container
+gets `Connection refused (os error 111)` and the proxy logs nothing.
+
+To use the proxy from another container or host, either:
+
+- share the host network with the client container, e.g.
+  `docker run --network host ... ghcr.io/tun2proxy/tun2proxy-ubuntu:latest --proxy socks5://127.0.0.1:9999`, or
+- bind the proxy to a reachable address with SOCKS5 credentials and point the
+  client at the host's address on that network, e.g.
+  `--addr 172.17.0.1:9999 --socks-user <user> --socks-password <pass>` and
+  `--proxy socks5://<user>:<pass>@172.17.0.1:9999` (172.17.0.1 is the default
+  Docker bridge gateway).
+
+The proxy refuses to start on a non-loopback `--addr` unless `--socks-user`
+and `--socks-password` (or `SOCKS_USER` / `SOCKS_PASSWORD`) are set, so an
+unauthenticated port is never exposed to the network. Prefer binding to a
+specific trusted interface over `0.0.0.0`.
+
+UDP (for example DNS through tun2proxy) uses SOCKS5 UDP ASSOCIATE. The UDP
+relay is opened on the same local address the client connected to, so it is
+reachable wherever the TCP port is.
 
 ## Technical Details
 

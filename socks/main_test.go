@@ -22,7 +22,7 @@ import (
 // exercise the real, current text/literals rather than a copy that could
 // drift from it.
 
-// usageFromSource extracts the literal `usage := \`...\`` doc string from
+// usageFromSource extracts the literal `usage := \`...\“ doc string from
 // main.go.
 func usageFromSource(t *testing.T) string {
 	t.Helper()
@@ -133,5 +133,76 @@ func TestDevSocksProxyHasNoValidUserOverride(t *testing.T) {
 		t.Fatalf("found a ValidUser assignment between NewSocksProxyWithDefaults() and "+
 			"ConnectDialWithRequest; the dev \"any credentials accepted\" override should "+
 			"have been removed in favor of the library's nil-ValidUser no-auth default:\n%s", between)
+	}
+}
+
+// TestCheckListenAuth pins that the dev proxy never exposes an
+// unauthenticated socks5 port beyond loopback: a network-reachable --addr
+// (for example so a tun2proxy container can reach it) requires credentials.
+func TestCheckListenAuth(t *testing.T) {
+	cases := []struct {
+		addr    string
+		user    string
+		pass    string
+		wantErr bool
+	}{
+		{"127.0.0.1:9999", "", "", false},
+		{"[::1]:9999", "", "", false},
+		{"localhost:9999", "", "", false},
+		{"0.0.0.0:9999", "", "", true},
+		{":9999", "", "", true},
+		{"[::]:9999", "", "", true},
+		{"172.17.0.1:9999", "", "", true},
+		{"proxy.example:9999", "", "", true},
+		{"not-an-addr", "", "", true},
+		{"0.0.0.0:9999", "u", "p", false},
+		{"172.17.0.1:9999", "u", "p", false},
+		{"127.0.0.1:9999", "u", "p", false},
+		{"0.0.0.0:9999", "u", "", true},
+		{"127.0.0.1:9999", "", "p", true},
+	}
+	for _, c := range cases {
+		err := checkListenAuth(c.addr, c.user, c.pass)
+		if (err != nil) != c.wantErr {
+			t.Errorf("checkListenAuth(%q, %q, %q) = %v, wantErr %v", c.addr, c.user, c.pass, err, c.wantErr)
+		}
+	}
+}
+
+func TestSocksCredentialValidator(t *testing.T) {
+	valid := socksCredentialValidator("alice", "s3cret")
+	if !valid("alice", "s3cret", "10.0.0.2:1234") {
+		t.Fatal("configured credentials rejected")
+	}
+	for _, c := range [][2]string{{"alice", "wrong"}, {"bob", "s3cret"}, {"", ""}, {"alice", ""}, {"alice", "s3cret "}} {
+		if valid(c[0], c[1], "10.0.0.2:1234") {
+			t.Fatalf("credentials %q/%q accepted", c[0], c[1])
+		}
+	}
+}
+
+// TestReadmeDocumentsAddrDefault keeps socks/README.md in sync with the
+// actual --addr default. The README used to document the old wildcard
+// ":9999", which led users to point container clients at 127.0.0.1.
+func TestReadmeDocumentsAddrDefault(t *testing.T) {
+	data, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	var addrLine string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "- `--addr`") {
+			addrLine = line
+			break
+		}
+	}
+	if addrLine == "" {
+		t.Fatal("README.md has no --addr option line")
+	}
+	if !strings.Contains(addrLine, "`127.0.0.1:9999`") {
+		t.Fatalf("README --addr line = %q, want it to document default 127.0.0.1:9999", addrLine)
+	}
+	if strings.Contains(addrLine, "`:9999`") {
+		t.Fatalf("README --addr line = %q, still documents the old wildcard default", addrLine)
 	}
 }

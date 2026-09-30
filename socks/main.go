@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
@@ -49,6 +50,8 @@ func main() {
 		city        string
 		country     string
 		region      string
+		socksUser   string
+		socksPass   string
 	}{}
 	usage := `socksproxy - dev socks5 proxy over urnetwork.
 
@@ -56,7 +59,10 @@ Usage:
     socksproxy [options]
 
 Options:
-    --addr=<addr>                  socks5 server address (env ADDR, default 127.0.0.1:9999)
+    --addr=<addr>                  socks5 server address (env ADDR, default 127.0.0.1:9999).
+                                   a non-loopback address requires --socks-user and --socks-password.
+    --socks-user=<socks-user>      socks5 username clients must send (env SOCKS_USER)
+    --socks-password=<socks-pass>  socks5 password clients must send (env SOCKS_PASSWORD)
     --api-url=<api-url>            api url (env API_URL, default https://api.bringyour.com)
     --platform-url=<platform-url>  platform url (env PLATFORM_URL, default wss://connect.bringyour.com)
     --user-auth=<user-auth>        user auth, required (env USER_AUTH)
@@ -98,8 +104,14 @@ Options:
 	cfg.city = pick("--city", "CITY", "")
 	cfg.country = pick("--country", "COUNTRY", "")
 	cfg.region = pick("--region", "REGION", "")
+	cfg.socksUser = pick("--socks-user", "SOCKS_USER", "")
+	cfg.socksPass = pick("--socks-password", "SOCKS_PASSWORD", "")
 	if cfg.userAuth == "" || cfg.password == "" {
 		fmt.Fprintln(os.Stderr, "--user-auth and --password are required (or set USER_AUTH / PASSWORD)")
+		os.Exit(1)
+	}
+	if err := checkListenAuth(cfg.addr, cfg.socksUser, cfg.socksPass); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
@@ -216,6 +228,9 @@ Options:
 			fmt.Println("Dialing", network, addr, r.DestAddr.FQDN)
 			return dev.DialContext(ctx, network, addr)
 		}
+		if cfg.socksUser != "" {
+			socksProxy.ValidUser = socksCredentialValidator(cfg.socksUser, cfg.socksPass)
+		}
 
 		errCh := make(chan error, 1)
 		go func() {
@@ -234,6 +249,43 @@ Options:
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+// isLoopbackListenAddr reports whether a listen address only accepts
+// connections from this host. An empty host (":9999"), a wildcard or any
+// hostname other than localhost is treated as reachable from the network.
+func isLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// checkListenAuth refuses to expose an unauthenticated socks5 port to the
+// network. A loopback listen address may run without credentials; any other
+// address requires both a socks username and password.
+func checkListenAuth(addr string, socksUser string, socksPass string) error {
+	if (socksUser == "") != (socksPass == "") {
+		return errors.New("--socks-user and --socks-password must be set together (or set SOCKS_USER / SOCKS_PASSWORD)")
+	}
+	if socksUser == "" && !isLoopbackListenAddr(addr) {
+		return fmt.Errorf("--addr %s is reachable from the network; set --socks-user and --socks-password (or SOCKS_USER / SOCKS_PASSWORD) to require socks5 authentication", addr)
+	}
+	return nil
+}
+
+// socksCredentialValidator accepts only the configured username and password.
+func socksCredentialValidator(socksUser string, socksPass string) func(user string, password string, userAddr string) bool {
+	return func(user string, password string, userAddr string) bool {
+		userOk := subtle.ConstantTimeCompare([]byte(user), []byte(socksUser)) == 1
+		passOk := subtle.ConstantTimeCompare([]byte(password), []byte(socksPass)) == 1
+		return userOk && passOk
 	}
 }
 
