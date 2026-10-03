@@ -54,3 +54,5 @@ replace github.com/pion/sctp => ../connect/sctp
 replace github.com/urnetwork/glog => ../glog
 
 replace github.com/urnetwork/userwireguard => ../userwireguard
+
+replace gvisor.dev/gvisor => ../gvisor
