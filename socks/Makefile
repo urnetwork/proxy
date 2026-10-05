@@ -11,9 +11,9 @@ build:
 	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/linux/amd64/
 	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=386 go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/linux/386/
 	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=mips GOMIPS=softfloat go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/linux/mips/
-	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldflags "-w -s -w -s -X main.Version=${WARP_VERSION}" -o build/linux/mipsle/
-	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=mips64 GOMIPS=softfloat go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/linux/mips64/
-	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=mips64le GOMIPS=softfloat go build -trimpath -ldflags "-w -s -w -s -X main.Version=${WARP_VERSION}" -o build/linux/mips64le/
+	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/linux/mipsle/
+	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=mips64 GOMIPS64=softfloat go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/linux/mips64/
+	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=mips64le GOMIPS64=softfloat go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/linux/mips64le/
 	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/darwin/arm64/
 	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/darwin/amd64/
 	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/windows/arm64/
