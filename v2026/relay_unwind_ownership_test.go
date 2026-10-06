@@ -9,7 +9,7 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 // Aborts only after the opposite direction has entered its owned socket read.
