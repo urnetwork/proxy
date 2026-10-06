@@ -78,7 +78,9 @@ type SocksProxy struct {
 	serverMu   sync.Mutex
 	server     *socksServer
 
-	statsLogOnce sync.Once
+	statsLogOnce      sync.Once
+	statsLogStateLock sync.Mutex
+	statsLogDone      chan struct{}
 
 	ConnectDialWithRequest func(ctx context.Context, r SocksRequest, network string, addr string) (net.Conn, error)
 	ValidUser              func(user string, password string, userAddr string) bool
@@ -193,10 +195,45 @@ func (self *SocksProxy) ListenAndServe(ctx context.Context, network string, addr
 
 	// one flusher, however many address families are served
 	self.statsLogOnce.Do(func() {
-		go connect.HandleError(func() {
-			logStatsPeriodically(ctx, self.logger(), "[socks]", self.settings.StatsLogInterval, self.Stats)
-		})
+		done := make(chan struct{})
+		func() {
+			self.statsLogStateLock.Lock()
+			defer self.statsLogStateLock.Unlock()
+			self.statsLogDone = done
+		}()
+		go func() {
+			defer close(done)
+			connect.HandleError(func() {
+				logStatsPeriodically(ctx, self.logger(), "[socks]", self.settings.StatsLogInterval, self.Stats)
+			})
+		}()
 	})
 
 	return server.ListenAndServe(ctx, network, addr)
+}
+
+// Joins this instance's single stats worker after its serving context is canceled.
+// The caller must first join all ListenAndServe attempts so none can start the
+// worker afterward. A never-served instance is already complete. This wait is
+// concurrent-safe and may be retried after the caller's context expires.
+func (self *SocksProxy) WaitStats(ctx context.Context) error {
+	done := func() chan struct{} {
+		self.statsLogStateLock.Lock()
+		defer self.statsLogStateLock.Unlock()
+		return self.statsLogDone
+	}()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

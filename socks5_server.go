@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -57,15 +58,26 @@ func (s *socksServer) ListenAndServe(ctx context.Context, network, addr string) 
 	if err != nil {
 		return err
 	}
+	return s.serve(ctx, l)
+}
+
+// Serves an already-created listener; admission and graceful draining match ListenAndServe.
+func (self *socksServer) serve(ctx context.Context, l net.Listener) error {
 	// a drain that already began closes the listener; do not serve it
-	if !s.drain.registerListener(l) {
+	if !self.drain.registerListener(l) {
 		return nil
 	}
-	defer s.drain.unregisterListener(l)
+	defer self.drain.unregisterListener(l)
 
 	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var workers sync.WaitGroup
+	defer func() {
+		cancel()
+		workers.Wait()
+	}()
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		<-runCtx.Done()
 		l.Close()
 	}()
@@ -77,7 +89,7 @@ func (s *socksServer) ListenAndServe(ctx context.Context, network, addr string) 
 			if runCtx.Err() != nil {
 				return nil
 			}
-			if s.drain.Draining() {
+			if self.drain.Draining() {
 				// drain closed the listener. In-flight connections keep
 				// relaying under runCtx, so do NOT return yet — returning
 				// would run the deferred cancel and kill them. Block until
@@ -93,16 +105,18 @@ func (s *socksServer) ListenAndServe(ctx context.Context, network, addr string) 
 		// Account the accepted connection before handing it to a goroutine.
 		// Drain and admission share one lock, so WaitIdle cannot observe zero
 		// in the scheduling gap and return just before this session starts.
-		if !s.drain.tryEnter() {
+		if !self.drain.tryEnter() {
 			conn.Close()
 			continue
 		}
+		workers.Add(1)
 		go func() {
+			defer workers.Done()
 			// A connection that fails to serve is a normal, client-driven outcome
 			// (a bad handshake, an unreachable destination, a client that hung up).
 			// Logging it would let a client drive unbounded log I/O, so it is not
 			// logged; ServeConn records what it needs in SocksStats.
-			s.serveConn(runCtx, conn)
+			self.serveConn(runCtx, conn)
 		}()
 	}
 }
@@ -124,7 +138,11 @@ func (s *socksServer) serveConn(ctx context.Context, conn net.Conn) (err error) 
 	// CONNECT relays and UDP associations (both block in here for their whole
 	// life).
 	defer s.drain.exit()
-	defer conn.Close()
+	joinClose := afterFuncAndJoin(ctx, func() { conn.Close() })
+	defer func() {
+		joinClose()
+		conn.Close()
+	}()
 	defer func() {
 		if r := recover(); r != nil {
 			s.logger().Errorf("[socks]panic serving %v: %v", conn.RemoteAddr(), r)

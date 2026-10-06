@@ -197,6 +197,13 @@ func relayBidi(
 	// copyDir relays src->dst and then decides whether the relay as a whole is
 	// over. It is the only place teardown is triggered by a direction ending.
 	copyDir := func(dst io.Writer, src io.Reader) {
+		completed := false
+		defer func() {
+			// Panic and Goexit must both unblock the peer copy.
+			if !completed {
+				cancel()
+			}
+		}()
 		_, err := relayCopy(ctx, dst, src, config.Buffers, config.ReadTimeout, config.WriteTimeout, nil)
 		errs <- err
 		if err == nil && halfClose {
@@ -204,10 +211,12 @@ func relayBidi(
 				// a clean end of stream: pass the FIN through and let the peer keep
 				// sending. The relay ends once BOTH directions are done.
 				closer.CloseWrite()
+				completed = true
 				return
 			}
 		}
 		cancel()
+		completed = true
 	}
 
 	// Force any parked direction to unwind when ctx is canceled.
@@ -216,30 +225,33 @@ func relayBidi(
 	// one if ctx actually fires. A `select { case <-ctx.Done(): }` watcher would
 	// park a goroutine for the entire life of every connection, and a goroutine's
 	// stack is the single largest per-connection memory item at scale.
-	stop := context.AfterFunc(ctx, func() {
+	stop := afterFuncAndJoin(ctx, func() {
 		relayForceUnblock(a.Reader, a.Writer, b.Reader, b.Writer)
 	})
-	defer stop()
-
 	var wg sync.WaitGroup
+	completed := false
+	defer func() {
+		if !completed {
+			cancel()
+		}
+		// The caller may Goexit before reaching the ordinary wait below.
+		wg.Wait()
+		stop()
+	}()
 	wg.Add(1)
-	go connect.HandleError(func() {
+	go func() {
 		defer wg.Done()
-		copyDir(b.Writer, a.Reader)
-	})
+		connect.HandleError(func() { copyDir(b.Writer, a.Reader) })
+	}()
 
 	// The other direction runs on the CALLER's goroutine. Spawning one for each
 	// direction would pay a second stack per connection for no benefit: the caller
 	// is already a per-connection goroutine and has nothing else to do until the
 	// relay ends.
-	connect.HandleError(func() {
-		copyDir(a.Writer, b.Reader)
-	}, func() {
-		// a panic here must still unblock the other direction, or wg.Wait hangs
-		cancel()
-	})
+	connect.HandleError(func() { copyDir(a.Writer, b.Reader) })
 
 	wg.Wait()
+	completed = true
 
 	var returnErr error
 	for i := 0; i < 2; i += 1 {

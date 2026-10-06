@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -165,136 +166,129 @@ func (self *HttpProxy) proxyConnectTimeout() time.Duration {
 	return self.settings.ProxyConnectTimeout
 }
 
+// Listens for plain http; the serving scope owns the listener until hard shutdown.
 func (self *HttpProxy) ListenAndServe(ctx context.Context, network string, addr string) error {
-
 	listenConfig := net.ListenConfig{}
-
-	l, err := listenConfig.Listen(
-		ctx,
-		network,
-		addr,
-	)
+	l, err := listenConfig.Listen(ctx, network, addr)
 	if err != nil {
 		return err
 	}
-	// a drain that already began closes the listener; do not serve it
-	if !self.drain.registerListener(l) {
-		return nil
-	}
-	defer self.drain.unregisterListener(l)
-
-	runCtx, runCancel := context.WithCancel(ctx)
-	defer runCancel()
-
-	httpServer := &http.Server{
+	return self.serve(ctx, l, &http.Server{
 		Addr:         addr,
 		Handler:      self,
 		ReadTimeout:  self.settings.ProxyReadTimeout,
 		WriteTimeout: self.settings.ProxyWriteTimeout,
 		IdleTimeout:  self.settings.ProxyIdleTimeout,
-		// net/http logs client-driven failures here — a bad TLS handshake, a
-		// malformed request, a connection that hung up. A client controls how often
-		// those happen, so leaving this at the default hands it a log-amplification
-		// vector: one malformed byte buys a disk write. Discard them.
-		ErrorLog: discardLog,
-		// Every request context descends from runCtx, so shutting the proxy down
-		// tears down in-flight handlers. This is the ONLY thing that reaches a
-		// hijacked tunnel: `Server.Close` deliberately knows nothing about hijacked
-		// connections, so without this a CONNECT relay to a black-holed upstream
-		// would outlive the server and hold its fds until the process exits.
-		BaseContext: func(net.Listener) context.Context {
-			return runCtx
-		},
-	}
-
-	go connect.HandleError(func() {
-		defer l.Close()
-		defer httpServer.Close()
-		select {
-		case <-runCtx.Done():
-		}
+		ErrorLog:     discardLog,
 	})
-
-	go connect.HandleError(func() {
-		logStatsPeriodically(runCtx, self.logger(), "[http]", self.settings.StatsLogInterval, self.Stats)
-	})
-
-	err = httpServer.Serve(l)
-	// shutdown closes the listener out from under Serve; a clean exit
-	if runCtx.Err() != nil {
-		return nil
-	}
-	if self.drain.Draining() {
-		// drain closed the listener. In-flight requests and tunnels keep
-		// relaying under runCtx, so do NOT return yet — returning would run
-		// the deferred runCancel and kill them. Block until the caller ends
-		// the drain by canceling ctx, which remains the hard teardown.
-		select {
-		case <-runCtx.Done():
-		}
-		return nil
-	}
-	return err
 }
 
+// Listens for tls; certificate callbacks belong to the accepted connection lifetime.
 func (self *HttpProxy) ListenAndServeTls(ctx context.Context, network string, addr string) error {
-
-	tlsConfig := &tls.Config{
-		GetConfigForClient: self.GetTlsConfigForClient,
-	}
-
+	tlsConfig := &tls.Config{GetConfigForClient: self.GetTlsConfigForClient}
 	listenConfig := net.ListenConfig{}
-
-	l, err := listenConfig.Listen(
-		ctx,
-		network,
-		addr,
-	)
+	l, err := listenConfig.Listen(ctx, network, addr)
 	if err != nil {
 		return err
 	}
-	// see `ListenAndServe`: a drain that already began closes the listener
-	if !self.drain.registerListener(l) {
-		return nil
-	}
-	defer self.drain.unregisterListener(l)
-
-	runCtx, runCancel := context.WithCancel(ctx)
-	defer runCancel()
-
-	httpServer := &http.Server{
+	return self.serve(ctx, l, &http.Server{
 		Addr:         addr,
 		Handler:      self,
 		TLSConfig:    tlsConfig,
 		ReadTimeout:  self.settings.ProxyReadTimeout,
 		WriteTimeout: self.settings.ProxyWriteTimeout,
 		IdleTimeout:  self.settings.ProxyIdleTimeout,
-		// see `ListenAndServe`: client-driven failures must not reach a log
-		ErrorLog: discardLog,
-		// see `ListenAndServe`: this is what lets shutdown reach a hijacked tunnel
-		BaseContext: func(net.Listener) context.Context {
-			return runCtx
-		},
-	}
-
-	go connect.HandleError(func() {
-		defer l.Close()
-		defer httpServer.Close()
-		select {
-		case <-runCtx.Done():
-		}
+		ErrorLog:     discardLog,
 	})
+}
 
-	err = httpServer.ServeTLS(l, "", "")
-	// see `ListenAndServe`: shutdown is a clean exit, and a drain must not
-	// return (and so cancel runCtx) while in-flight tunnels are relaying
+// Serves an already-created listener with the public settings and graceful-drain policy.
+func (self *HttpProxy) serve(ctx context.Context, l net.Listener, httpServer *http.Server) error {
+	if !self.drain.registerListener(l) {
+		return nil
+	}
+	defer self.drain.unregisterListener(l)
+	runCtx, runCancel := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	var connections sync.WaitGroup
+	var handlers sync.WaitGroup
+	var stateLock sync.Mutex
+	acceptHandlers := true
+	handler := httpServer.Handler
+	httpServer.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		admitted := func() bool {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			if !acceptHandlers {
+				return false
+			}
+			handlers.Add(1)
+			return true
+		}()
+		if !admitted {
+			return
+		}
+		defer handlers.Done()
+		handler.ServeHTTP(w, r)
+	})
+	connState := httpServer.ConnState
+	httpServer.ConnState = func(conn net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			// net/http invokes StateNew before dispatch and before Serve can return.
+			connections.Add(1)
+		}
+		if state == http.StateClosed || state == http.StateHijacked {
+			// A hijacked connection is retained by the independently counted handler.
+			defer connections.Done()
+		}
+		if connState != nil {
+			connState(conn, state)
+		}
+	}
+	defer func() {
+		runCancel()
+		func() {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			// Seal handler admission even if a dispatched http2 handler starts late.
+			acceptHandlers = false
+		}()
+		workers.Wait()
+		connections.Wait()
+		handlers.Wait()
+	}()
+	httpServer.BaseContext = func(net.Listener) context.Context { return runCtx }
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		connect.HandleError(func() {
+			defer l.Close()
+			defer httpServer.Close()
+			<-runCtx.Done()
+		})
+	}()
+	// Preserve the existing single plaintext flusher for a plaintext/tls pair.
+	if httpServer.TLSConfig == nil {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			connect.HandleError(func() {
+				logStatsPeriodically(runCtx, self.logger(), "[http]", self.settings.StatsLogInterval, self.Stats)
+			})
+		}()
+	}
+	var err error
+	if httpServer.TLSConfig == nil {
+		err = httpServer.Serve(l)
+	} else {
+		err = httpServer.ServeTLS(l, "", "")
+	}
 	if runCtx.Err() != nil {
 		return nil
 	}
 	if self.drain.Draining() {
-		select {
-		case <-runCtx.Done():
-		}
+		// Keep established work alive until the caller ends its graceful drain.
+		<-runCtx.Done()
 		return nil
 	}
 	return err
@@ -357,9 +351,13 @@ func (self *HttpProxy) handleHttps(w http.ResponseWriter, r *http.Request) {
 	// context.AfterFunc does not hold a goroutine while it waits (unlike a
 	// `select { case <-ctx.Done(): }` watcher), and a goroutine's stack is the
 	// largest per-connection memory item at scale.
-	context.AfterFunc(handleCtx, func() {
+	joinClose := afterFuncAndJoin(handleCtx, func() {
 		conn.Close()
 	})
+	defer func() {
+		handleCancel()
+		joinClose()
+	}()
 
 	// Anything net/http already buffered past the request belongs to the client's
 	// stream (a client may pipeline bytes with the CONNECT rather than wait for
@@ -373,6 +371,11 @@ func (self *HttpProxy) handleHttps(w http.ResponseWriter, r *http.Request) {
 	// watch the dial retry below would never terminate for an unreachable
 	// upstream — retrying forever and leaking this goroutine and the client fd.
 	watch := watchClientClose(handleCtx, handleCancel, conn)
+	defer func() {
+		// A dial panic or Goexit still owns the already-started client reader.
+		handleCancel()
+		watch.stop()
+	}()
 
 	// r.URL.Host contains both the host and port (if specified)
 	var proxyConn net.Conn
@@ -441,25 +444,30 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 	// dialFailed records that an attempt died before the request could reach the
 	// origin, which makes the attempt safe to retry whatever the method.
 	var dialFailed atomic.Bool
+	dialOwner := newHttpDialOwner(handleCtx)
 
 	tr := &http.Transport{
-		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
-			return connect.HandleError2(func() (net.Conn, error) {
-				conn, err := self.connectDial(ctx, r, network, addr)
-				if err != nil {
+		DialContext: func(_ context.Context, network string, addr string) (net.Conn, error) {
+			return dialOwner.dial(func(ctx context.Context) (net.Conn, error) {
+				return connect.HandleError2(func() (net.Conn, error) {
+					conn, err := self.connectDial(ctx, r, network, addr)
+					if err != nil {
+						dialFailed.Store(true)
+					}
+					return conn, err
+				}, func() (net.Conn, error) {
 					dialFailed.Store(true)
-				}
-				return conn, err
-			}, func() (net.Conn, error) {
-				dialFailed.Store(true)
-				return nil, fmt.Errorf("Unexpected error")
+					return nil, fmt.Errorf("Unexpected error")
+				})
 			})
 		},
 		DisableKeepAlives:     true,
 		TLSHandshakeTimeout:   self.settings.ProxyTlsHandshakeTimeout,
 		ResponseHeaderTimeout: self.settings.ProxyReadTimeout,
 	}
-	defer tr.CloseIdleConnections()
+	// RoundTrip may return before its detached dial callback. Retain the
+	// handler's drain admission until every callback and connection is retired.
+	defer dialOwner.closeAndWait(tr.CloseIdleConnections)
 
 	var response *http.Response
 	for {
@@ -518,9 +526,13 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
-		context.AfterFunc(handleCtx, func() {
+		joinClose := afterFuncAndJoin(handleCtx, func() {
 			conn.Close()
 		})
+		defer func() {
+			handleCancel()
+			joinClose()
+		}()
 
 		// proxyRw is net/http's upgrade body: it supports no deadlines at all, so
 		// the only thing that can unblock a read parked on it is closing it. The
@@ -580,6 +592,7 @@ type clientWatch struct {
 	// stopping distinguishes the read error that `stop` induces on purpose from a
 	// real client disconnect. Without it, ending the watch would look exactly like
 	// the client going away and would cancel the tunnel it just established.
+	stopOnce sync.Once
 	stopping atomic.Bool
 	early    []byte
 }
@@ -593,37 +606,41 @@ func watchClientClose(ctx context.Context, cancel context.CancelFunc, conn net.C
 		conn: conn,
 		done: make(chan struct{}),
 	}
-	go connect.HandleError(func() {
+	go func() {
 		defer close(watch.done)
-		buf := make([]byte, 4096)
-		for {
-			n, err := conn.Read(buf)
-			if 0 < n {
-				watch.early = append(watch.early, buf[:n]...)
-				if maxEarlyClientBytes <= len(watch.early) {
-					// the client is demonstrably alive; stop buffering it
+		connect.HandleError(func() {
+			buf := make([]byte, 4096)
+			for {
+				n, err := conn.Read(buf)
+				if 0 < n {
+					watch.early = append(watch.early, buf[:n]...)
+					if maxEarlyClientBytes <= len(watch.early) {
+						// the client is demonstrably alive; stop buffering it
+						return
+					}
+				}
+				if err != nil {
+					if !watch.stopping.Load() && ctx.Err() == nil {
+						// the client dropped before the tunnel was established
+						cancel()
+					}
 					return
 				}
 			}
-			if err != nil {
-				if !watch.stopping.Load() && ctx.Err() == nil {
-					// the client dropped before the tunnel was established
-					cancel()
-				}
-				return
-			}
-		}
-	})
+		})
+	}()
 	return watch
 }
 
 // stop ends the watch and returns any bytes the client sent early. It is safe to
 // call whether the watch is still blocked in a read or has already exited.
 func (self *clientWatch) stop() []byte {
-	self.stopping.Store(true)
-	self.conn.SetReadDeadline(aLongTimeAgo)
-	<-self.done
-	self.conn.SetReadDeadline(time.Time{})
+	self.stopOnce.Do(func() {
+		self.stopping.Store(true)
+		self.conn.SetReadDeadline(aLongTimeAgo)
+		<-self.done
+		self.conn.SetReadDeadline(time.Time{})
+	})
 	return self.early
 }
 

@@ -69,14 +69,22 @@ func (f *udpFlow) touch()            { f.last.Store(time.Now().UnixNano()) }
 func (f *udpFlow) lastActive() int64 { return f.last.Load() }
 func (f *udpFlow) close()            { f.closeOnce.Do(func() { f.conn.Close() }) }
 
+// A bound client-facing datagram socket owned by one association. Reads and writes
+// may run concurrently; Close must release an in-flight read before returning.
+type associationRelay interface {
+	ReadFromUDP([]byte) (int, *net.UDPAddr, error)
+	WriteToUDP([]byte, *net.UDPAddr) (int, error)
+	Close() error
+}
+
 // association is the state for one UDP ASSOCIATE, owned by the control
 // connection's goroutine. One relay goroutine reads client datagrams; one
 // reader goroutine per flow reads destination replies. All are tracked by wg so
 // teardown is deterministic.
 type association struct {
 	server *socksServer
-	req    *Request     // the ASSOCIATE request (carries AuthContext etc.)
-	relay  *net.UDPConn // client-facing socket
+	req    *Request         // the ASSOCIATE request (carries AuthContext etc.)
+	relay  associationRelay // client-facing socket
 	ctx    context.Context
 
 	idle            time.Duration
@@ -119,11 +127,16 @@ func (s *socksServer) handleAssociate(ctx context.Context, conn net.Conn, req *R
 		return err
 	}
 
+	return s.serveAssociate(ctx, conn, req, relay)
+}
+
+// Owns a bound and replied association until all relay work has completed.
+func (self *socksServer) serveAssociate(ctx context.Context, conn net.Conn, req *Request, relay associationRelay) error {
 	assocCtx, cancel := context.WithCancel(ctx)
 
-	settings := s.settings
+	settings := self.settings
 	a := &association{
-		server:          s,
+		server:          self,
 		req:             req,
 		relay:           relay,
 		ctx:             assocCtx,
@@ -131,7 +144,7 @@ func (s *socksServer) handleAssociate(ctx context.Context, conn net.Conn, req *R
 		maxFlows:        settings.AssociateMaxFlows,
 		writeTimeout:    settings.ProxyWriteTimeout,
 		maxDatagramSize: settings.MaxDatagramSize,
-		stats:           &s.stats,
+		stats:           &self.stats,
 		flows:           make(map[string]*udpFlow),
 	}
 	if req.DestAddr != nil {
@@ -147,7 +160,7 @@ func (s *socksServer) handleAssociate(ctx context.Context, conn net.Conn, req *R
 
 	// Unblock the control read when the association context is canceled
 	// (e.g. server shutdown) so teardown does not wait on client behavior.
-	stop := context.AfterFunc(assocCtx, func() {
+	stop := afterFuncAndJoin(assocCtx, func() {
 		conn.SetReadDeadline(time.Now())
 	})
 
