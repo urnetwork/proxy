@@ -131,6 +131,10 @@ type WgProxy struct {
 
 	events  chan uwgtun.Event
 	receive chan []byte
+	// Event sends finish or observe cancellation before the tun closes events.
+	// This lock is independent of every packet and client-map operation.
+	eventsLock   sync.RWMutex
+	eventsClosed bool
 
 	device *device.Device
 
@@ -187,8 +191,16 @@ func (self *wgTunDevice) AddEvent(event uwgtun.Event) {
 	self.proxy.AddEvent(event)
 }
 
+// The tun owns the event channel; closing it releases WireGuard's event reader.
+// Cancel first so a sender blocked on a full channel can release its read lock.
 func (self *wgTunDevice) Close() error {
 	self.proxy.cancel()
+	self.proxy.eventsLock.Lock()
+	defer self.proxy.eventsLock.Unlock()
+	if !self.proxy.eventsClosed {
+		self.proxy.eventsClosed = true
+		close(self.proxy.events)
+	}
 	return nil
 }
 
@@ -785,7 +797,14 @@ func (self *WgProxy) Events() <-chan uwgtun.Event {
 	return self.events
 }
 
+// Retains event ownership until admission or cancellation. The close guard
+// prevents a select from choosing a send on the already-closed channel.
 func (self *WgProxy) AddEvent(event uwgtun.Event) {
+	self.eventsLock.RLock()
+	defer self.eventsLock.RUnlock()
+	if self.eventsClosed || self.ctx.Err() != nil {
+		return
+	}
 	select {
 	case <-self.ctx.Done():
 	case self.events <- event:
