@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 // Capacity: how many concurrent clients actually fit in a memory budget?
