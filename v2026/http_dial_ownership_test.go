@@ -17,7 +17,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 // Observes actual connection retirement, including completion of a blocked
