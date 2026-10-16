@@ -6,8 +6,8 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/urnetwork/connect"
-	uwgtun "github.com/urnetwork/userwireguard/tun"
+	"github.com/urnetwork/connect/v2026"
+	uwgtun "github.com/urnetwork/userwireguard/v2026/tun"
 )
 
 // The real userspace device starts an event reader at construction. Its owner
