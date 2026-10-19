@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>socksproxy dev panel</title>
+<style>
+  :root { color-scheme: dark; }
+  /* URnetwork design tokens — extracted from the beta.app.ur.network
+     dashboard: ur-black/ur-white/ur-gray/ur-blue/ur-panel/ur-border/
+     ur-green/ur-coral/ur-pink/ur-yellow-light palette, AbcGravityExtended
+     headings, PpNeueMontreal body, PpNeueBitBold buttons, 8px radii,
+     flat 4px hard shadow */
+  body {
+    font-family: PpNeueMontrealRegular, system-ui, -apple-system, sans-serif;
+    background: #101010; /* ur-black */
+    color: #F8F8F8;      /* ur-white */
+    margin: 0; padding: 16px;
+  }
+  h1 { font-family: AbcGravityExtended, system-ui, sans-serif; font-size: 18px; font-weight: 400; margin: 0 0 4px; color: #F8F8F8; }
+  .sub { color: #909090; font-size: 12px; margin-bottom: 16px; } /* ur-gray-dark */
+  h2 {
+    font-family: AbcGravityExtended, system-ui, sans-serif;
+    font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+    color: #D6E6F4; /* ur-blue-light */
+    margin: 20px 0 8px; border-bottom: 1px solid #282828; padding-bottom: 4px;
+  }
+  .metric-grid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 6px; }
+  .metric {
+    background: #1C1C1C; /* ur-panel */
+    border: 1px solid #282828; /* ur-border */
+    border-radius: 8px; padding: 5px 7px;
+  }
+  .metric .v { font-size: 15px; font-weight: 600; color: #F8F8F8; }
+  .metric .l { font-size: 10px; color: #909090; }
+  @media (max-width: 1400px) { .metric-grid { grid-template-columns: repeat(6, 1fr); } }
+  @media (max-width: 900px) { .metric-grid { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 500px) { .metric-grid { grid-template-columns: repeat(2, 1fr); } }
+  .row { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid #212121; gap: 12px; }
+  .row .label { font-size: 13px; color: #F8F8F8; }
+  .row .detail { font-size: 11px; color: #909090; }
+  .row .value { font-size: 13px; color: #D6E6F4; white-space: nowrap; } /* ur-blue-light */
+  .btn {
+    background: #212121; /* ur-raised */
+    color: #F8F8F8;
+    border: 1px solid #282828;
+    border-radius: 8px;
+    padding: 6px 12px; font-size: 12px; cursor: pointer;
+    transition: background .15s;
+  }
+  .btn:hover { background: #282828; } /* ur-hover */
+  .btn:disabled { opacity: .4; cursor: default; }
+  .btn.danger { border-color: #FF6C58; color: #FF6C58; } /* ur-coral */
+  .btn.danger:hover { background: rgba(255,108,88,.12); }
+  .toggle { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid #212121; }
+  .toggle .label { font-size: 13px; color: #F8F8F8; }
+  .toggle .detail { font-size: 11px; color: #909090; }
+  .switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; } /* matches dashboard switch 44x24 */
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; background: #282828; border-radius: 9999px; transition: .15s; cursor: pointer; }
+  .switch input:focus-visible + .slider { outline: 2px solid #D6E6F4; outline-offset: 2px; }
+  .switch input:checked + .slider { background: #0039DE; } /* ur-blue */
+  .slider::before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #B7B7B7; border-radius: 50%; transition: .15s; }
+  .switch input:checked + .slider::before { transform: translateX(20px); background: #fff; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #212121; }
+  th { color: #909090; font-weight: 500; }
+  td code { color: #B7B7B7; }
+  .exit-actions { display: flex; gap: 4px; }
+  .badge { display: inline-block; padding: 0 5px; border-radius: 4px; font-size: 10px; margin-left: 4px; }
+  .badge.warn { background: rgba(239,247,187,.15); color: #EFF7BB; } /* ur-yellow-light */
+  .badge.quar { background: rgba(237,143,255,.15); color: #ED8FFF; } /* ur-pink */
+  .badge.done { background: #212121; color: #B7B7B7; }
+  .flash { margin-top: 10px; font-size: 12px; color: #909090; min-height: 16px; }
+  .connected { color: #87FB67; } /* ur-green */
+  .disconnected { color: #FF6C58; } /* ur-coral */
+</style>
+</head>
+<body>
+<div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
+  <img src="/favicon.svg" alt="URnetwork" style="width:36px; height:36px; border-radius:8px;">
+  <div>
+    <h1 style="margin:0;">socksproxy dev panel</h1>
+    <div class="sub" id="conn" style="margin:0;">connecting...</div>
+  </div>
+  <div style="margin-left:auto; text-align:right; font-size:12px; color:#8a8a98;" id="session">--</div>
+</div>
+
+<h2>Measurements</h2>
+<div class="metric-grid" id="metrics">loading...</div>
+
+<h2>Actions</h2>
+<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+  <button class="btn" id="btn-reset-metrics" title="Zero the reliability counters so a run starts clean (A/B runs: reset, drive the workload, read the numbers back)">Reset measurements</button>
+  <button class="btn" id="btn-shuffle" title="Replace every exit at once — forces a full re-selection. Not what a real outage looks like; use drop for that.">Shuffle exits</button>
+  <button class="btn" id="btn-probe-all" title="Fire a qualification probe pass at every exit right now instead of waiting for the background sweep">Probe all exits</button>
+  <button class="btn danger" id="btn-quit" title="Stop the socks proxy gracefully (same as Ctrl+C in the console). Confirms first.">Quit</button>
+</div>
+
+<div id="sections"></div>
+
+<h2>Exits</h2>
+<div id="exits">loading...</div>
+
+<div class="flash" id="flash"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+// ---- settings schema (mirrors the android developer screen) ----
+// groups in display order; each knob carries its json key + presets.
+// 0 first in every duration/count list = the pre-fix / off behavior.
+const TOGGLES = [
+  { key: "udpTeardownSignal", label: "UDP teardown signal", detail: "Signal teardown to peer on flow end", group: "Detection" },
+  { key: "busyProbe", label: "Busy probe", detail: "Ping a stalled exit before convicting it", group: "Detection" },
+  { key: "softVerdictDemote", label: "Soft verdict demote", detail: "Bench instead of execute on first verdict", group: "Detection" },
+  { key: "effectiveTierSelection", label: "Effective tier selection", detail: "Rank by live evidence, not static tier", group: "Placement" },
+  { key: "affinityStickyPastCap", label: "Affinity sticky past cap", detail: "Keep site flows on one exit past the cap", group: "Placement" },
+  { key: "quarantineGroupFollow", label: "Quarantine group follow", detail: "New flows follow a benched exit's site", group: "Placement" },
+  { key: "clusterAffinityFallback", label: "Cluster affinity fallback", detail: "Prefer same-cluster exits on failure", group: "Placement" },
+  { key: "serverNameAffinityBridge", label: "Server name affinity bridge", detail: "Bridge affinity across server names", group: "Placement" },
+  { key: "standingReserve", label: "Standing reserve", detail: "Keep one spare exit pre-connected", group: "Placement" },
+  { key: "quicRebindOnExitLoss", label: "QUIC rebind on exit loss", detail: "Re-pin established QUIC flows on removal", group: "Recovery" },
+  { key: "dialFailureRerace", label: "Dial failure re-race", detail: "Re-race flows past failed dials", group: "Recovery" },
+  { key: "providerProbe", label: "Probe providers", detail: "Qualify exits by dialing real sites", group: "Probing" },
+];
+
+const DURATIONS = [
+  { key: "sendStallTimeoutMs", label: "Send stall timeout", detail: "Wait before judging an exit stalled", presets: [0, 1000, 2000, 3000, 5000, 10000], group: "Detection" },
+  { key: "busyProbeBudgetMs", label: "Busy probe budget", detail: "Ack budget for a busy probe", presets: [0, 1000, 1500, 2000, 3000], group: "Detection" },
+  { key: "schedulerPauseToleranceMs", label: "Scheduler pause tolerance", detail: "Timer overshoot read as host suspend", presets: [0, 1000, 2000, 5000], group: "Detection" },
+  { key: "schedulerPauseRecoveryTimeoutMs", label: "Scheduler pause recovery", detail: "Hold verdicts after a detected suspend", presets: [0, 3000, 5000, 10000], group: "Detection" },
+  { key: "blackholeConnectComparativeTimeoutMs", label: "Comparative connect", detail: "Faster no-receive-syn bar beside live exits", presets: [0, 5000, 10000, 15000], group: "Detection" },
+  { key: "blackholeReceiveTimeoutMs", label: "Blackhole receive", detail: "No destination data before exit dropped", presets: [0, 5000, 10000, 20000, 25000], group: "Detection" },
+  { key: "groupFollowWindowMs", label: "Group follow window", detail: "How long a bench keeps collecting flows", presets: [0, 15000, 45000, 90000], group: "Placement" },
+  { key: "removalBudgetWindowMs", label: "Removal budget window", detail: "Window the storm breaker counts over", presets: [0, 15000, 30000, 60000], group: "Placement" },
+  { key: "uplinkStalenessGateMs", label: "Uplink gate", detail: "Hold verdicts while tunnel-wide silent", presets: [0, 3000, 5000, 10000], group: "Recovery" },
+  { key: "formationPollTimeoutMs", label: "Formation poll", detail: "How often flowless windows re-check", presets: [0, 100, 200, 500], group: "Recovery" },
+  { key: "tcpCollapseMaxHoldMs", label: "TCP collapse hold", detail: "Hold before declaring a collapse", presets: [0, 500, 1000, 1500, 3000, 5000], group: "Recovery" },
+  { key: "tcpSequenceIdleTimeoutMs", label: "TCP idle timeout", detail: "Idle before sequence teardown", presets: [0, 120000, 300000, 600000, 1800000], group: "Recovery" },
+  { key: "sequenceIdleTimeoutMs", label: "UDP idle timeout", detail: "Idle before non-TCP teardown", presets: [0, 30000, 60000, 120000, 300000], group: "Recovery" },
+  { key: "probeTimeoutMs", label: "Probe timeout", detail: "Max wait for probe evidence", presets: [0, 2000, 4000, 8000], group: "Probing" },
+  { key: "heartbeatIntervalMs", label: "Heartbeat", detail: "One-line state heartbeat interval", presets: [0, 15000, 30000, 60000, 120000], group: "Observability" },
+];
+
+const COUNTS = [
+  { key: "maxFlowsPerExit", label: "Max flows per exit", detail: "Flow cap per exit; 0 = unlimited", presets: [0, 16, 32, 64, 128], zeroLabel: "Unlimited", group: "Placement" },
+  { key: "removalBudgetCount", label: "Removal budget count", detail: "Verdict removals per window; 0 = off", presets: [0, 2, 4, 8], zeroLabel: "Off", group: "Placement" },
+  { key: "minBlackholeDestinations", label: "Min blackhole destinations", detail: "Silent destinations needed; 0 = off", presets: [0, 1, 2, 3], zeroLabel: "Off", group: "Detection" },
+  { key: "blackholeLoadCorroboration", label: "Load corroboration", detail: "Flows-per-destination divisor; 0 = off", presets: [0, 4, 8, 16], zeroLabel: "Off", group: "Placement" },
+  { key: "evaluationPoolMultiple", label: "Evaluation pool", detail: "Candidates per slot evaluated", presets: [1, 2, 3], zeroLabel: "1", group: "Probing" },
+  { key: "probeSampleHostCount", label: "Probe sample hosts", detail: "Health hosts per pass; 0 = all", presets: [0, 4, 16, 64], zeroLabel: "All", group: "Probing" },
+  { key: "probeSilenceWarnStreak", label: "Probe silence warn streak", detail: "Silent passes before warn", presets: [0, 2, 3, 5], zeroLabel: "Off", group: "Probing" },
+];
+
+const GROUPS = ["Detection", "Placement", "Recovery", "Probing", "Observability"];
+let settings = null;
+let exits = [];
+let lastStats = null; // previous /stats snapshot for live throughput deltas
+
+function fmtMs(ms) {
+  if (ms == null) return "-";
+  if (ms < 1000) return ms + "ms";
+  if (ms < 60000) return (ms / 1000).toFixed(1) + "s";
+  return (ms / 60000).toFixed(1) + "m";
+}
+
+function fmtBytes(b) {
+  if (b == null || b < 0) return "-";
+  if (b < 1024) return b + " B";
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let v = b;
+  let u = -1;
+  do { v /= 1024; u++; } while (v >= 1024 && u < units.length - 1);
+  return v.toFixed(1) + " " + units[u];
+}
+
+function fmtElapsed(totalSeconds) {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = Math.floor(totalSeconds % 60);
+  if (h > 0) return h + "h " + m + "m";
+  if (m > 0) return m + "m " + s + "s";
+  return s + "s";
+}
+
+// fmtRate renders a byte rate with auto-scaling units (B/s, KiB/s, MiB/s, ...)
+function fmtRate(bytesPerSec) {
+  if (bytesPerSec == null || bytesPerSec < 0 || !isFinite(bytesPerSec)) return "-";
+  if (bytesPerSec < 1024) return bytesPerSec.toFixed(0) + " B/s";
+  const units = ["KiB/s", "MiB/s", "GiB/s", "TiB/s"];
+  let v = bytesPerSec;
+  let u = -1;
+  do { v /= 1024; u++; } while (v >= 1024 && u < units.length - 1);
+  return v.toFixed(1) + " " + units[u];
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (e) {}
+  if (!res.ok) throw new Error((data && data.error) || (res.status + " " + res.statusText));
+  return data;
+}
+
+function flash(msg) { $("flash").textContent = msg; }
+
+async function refresh() {
+  try {
+    settings = await api("/settings");
+    $("conn").textContent = "connected — settings + metrics live";
+    $("conn").className = "connected";
+    renderSections();
+  } catch (e) {
+    $("conn").textContent = "disconnected: " + e.message;
+    $("conn").className = "disconnected";
+  }
+  try {
+    const m = await api("/metrics");
+    renderMetrics(m);
+  } catch (e) {}
+  try {
+    const s = await api("/stats");
+    // live throughput: delta bytes / delta time between consecutive polls
+    const now = Date.now();
+    let upRate = null, downRate = null;
+    if (lastStats && (now - lastStats.at) > 0) {
+      upRate = (s.bytesUp - lastStats.bytesUp) * 1000 / (now - lastStats.at);
+      downRate = (s.bytesDown - lastStats.bytesDown) * 1000 / (now - lastStats.at);
+    }
+    lastStats = { bytesUp: s.bytesUp, bytesDown: s.bytesDown, at: now };
+    $("session").textContent =
+      fmtElapsed(s.elapsedSeconds) + " · ↑ " + fmtBytes(s.bytesUp) + " · ↓ " + fmtBytes(s.bytesDown) +
+      (upRate != null ? " · ↑ " + fmtRate(upRate) + " · ↓ " + fmtRate(downRate) : "");
+  } catch (e) {}
+  try {
+    exits = await api("/exits");
+    renderExits();
+  } catch (e) {}
+}
+
+// ---- measurements ----
+// exactly 18 cards = 2 rows x 9 columns on a wide window; the breakpoints
+// (6/3/2 columns) all divide 18 evenly so no row is ever left short
+function renderMetrics(m) {
+  const items = [
+    ["flows_opened", m.FlowsOpened, "flows opened"],
+    ["dial_fail", m.DialFailuresIntercepted, "dial failures intercepted"],
+    ["reraced", m.FlowsReraced, "flows re-raced"],
+    ["blast_radius", m.MeanFlowsLostPerExitLoss != null ? m.MeanFlowsLostPerExitLoss.toFixed(2) : "-", "mean flows lost / exit loss"],
+    ["worst_loss", m.MaxFlowsLostInOneEvent, "worst single event"],
+    ["recovery_mean", fmtMs(Math.round((m.RecoveryMeanNanos || 0) / 1e6)), "recovery mean"],
+    ["recovery_max", fmtMs(Math.round((m.RecoveryMaxNanos || 0) / 1e6)), "recovery max"],
+    ["recovery_pending", m.RecoveryPending, "recovery pending"],
+    ["recovery_missed", m.RecoveryMissed, "recovery missed"],
+    ["probes", (m.ProbesSent || 0) + "/" + (m.ProbesAnswered || 0), "probes sent/answered"],
+    ["qualified", m.ProvidersQualified, "providers qualified"],
+    ["busy", (m.BusyProbesSent || 0) + "/" + (m.BusyProbesAcquitted || 0), "busy probes sent/acquitted"],
+    ["verdicts_held", (m.VerdictsHeldUplinkStale || 0) + "/" + (m.VerdictsHeldTransportDown || 0), "verdicts held (uplink/transport)"],
+    ["removals_deferred", m.RemovalsDeferred, "removals deferred"],
+    ["rebound", (m.FlowsRebound || 0) + " a" + (m.RebindsAccepted || 0) + "/r" + (m.RebindsRedialed || 0), "rebound (accepted/redialed)"],
+    ["groups", (m.GroupsFollowed || 0) + "/" + (m.GroupsScattered || 0), "groups followed/scattered"],
+    ["exit_loss", m.ExitLossEvents, "exit loss events"],
+    ["flows_lost", m.FlowsLostToExit, "flows lost to exit"],
+  ];
+  $("metrics").innerHTML = items.map(([id, v, l]) =>
+    `<div class="metric"><div class="v">${v ?? "-"}</div><div class="l">${l}</div></div>`).join("");
+}
+
+// ---- settings knobs ----
+function renderSections() {
+  if (!settings) return;
+  const html = GROUPS.map(g => {
+    const toggles = TOGGLES.filter(t => t.group === g);
+    const durations = DURATIONS.filter(d => d.group === g);
+    const counts = COUNTS.filter(c => c.group === g);
+    if (!toggles.length && !durations.length && !counts.length) return "";
+    const rows = [
+      ...toggles.map(t => toggleRow(t)),
+      ...durations.map(d => durationRow(d)),
+      ...counts.map(c => countRow(c)),
+    ].join("");
+    return `<h2>${g}</h2>${rows}`;
+  }).join("");
+  $("sections").innerHTML = html;
+  // bind events after render
+  document.querySelectorAll(".switch input").forEach(inp => {
+    inp.addEventListener("change", async () => {
+      const key = inp.dataset.key;
+      const val = inp.checked;
+      flash("setting " + key + " = " + val + "...");
+      try {
+        const body = {}; body[key] = val;
+        settings = await api("/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        flash("set " + key + " = " + val);
+      } catch (e) { flash("error: " + e.message); refresh(); }
+    });
+  });
+  document.querySelectorAll("[data-cycle]").forEach(el => {
+    el.addEventListener("click", async () => {
+      const key = el.dataset.cycle;
+      const presets = JSON.parse(el.dataset.presets);
+      const cur = settings[key];
+      const idx = presets.indexOf(cur);
+      const next = presets[(idx + 1) % presets.length];
+      flash("setting " + key + " = " + next + "...");
+      try {
+        const body = {}; body[key] = next;
+        settings = await api("/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        flash("set " + key + " = " + next);
+        refresh();
+      } catch (e) { flash("error: " + e.message); refresh(); }
+    });
+    // keyboard operability: Enter and Space activate the cycle, matching the
+    // role="button" semantics added to the rows
+    el.addEventListener("keydown", async (ev) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      ev.preventDefault();
+      el.click();
+    });
+  });
+}
+
+function toggleRow(t) {
+  const val = !!settings[t.key];
+  return `<label class="toggle" data-key-label="${t.key}" style="cursor:pointer">
+    <div><div class="label">${t.label}</div><div class="detail">${t.detail}</div></div>
+    <span class="switch"><input type="checkbox" data-key="${t.key}" ${val ? "checked" : ""}><span class="slider"></span></span>
+  </label>`;
+}
+
+function durationRow(d) {
+  const cur = settings[d.key];
+  return `<div class="row" data-cycle="${d.key}" data-presets='${JSON.stringify(d.presets)}' tabindex="0" role="button" style="cursor:pointer">
+    <div><div class="label">${d.label}</div><div class="detail">${d.detail}</div></div>
+    <div class="value">${fmtMs(cur)}</div>
+  </div>`;
+}
+
+function countRow(c) {
+  const cur = settings[c.key];
+  const shown = (cur === 0) ? c.zeroLabel : cur;
+  return `<div class="row" data-cycle="${c.key}" data-presets='${JSON.stringify(c.presets)}' tabindex="0" role="button" style="cursor:pointer">
+    <div><div class="label">${c.label}</div><div class="detail">${c.detail}</div></div>
+    <div class="value">${shown}</div>
+  </div>`;
+}
+
+// esc escapes untrusted values before interpolation into innerHTML (exit
+// rows carry engine-provided strings that must not be executable markup).
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[ch]);
+}
+
+// ---- exits ----
+function renderExits() {
+  if (!exits || !exits.length) { $("exits").textContent = "no exits"; return; }
+  const rows = exits.map(e => {
+    const badges = (e.Warning ? '<span class="badge warn">W</span>' : "") +
+                   (e.Quarantined ? '<span class="badge quar">Q</span>' : "") +
+                   (e.Done ? '<span class="badge done">D</span>' : "");
+    const id = e.ClientId || "";
+    const short = id.length > 8 ? id.slice(-8) : id;
+    const tier = esc(e.Tier) + "→" + esc(e.EffectiveTier);
+    return `<tr>
+      <td><code>${esc(short)}</code>${badges}</td>
+      <td>${esc(e.FlowCount ?? 0)}</td>
+      <td>${esc(e.DialFailureCount ?? 0)}</td>
+      <td>${tier}</td>
+      <td>${e.Proven ? "yes" : "no"}</td>
+      <td><span class="exit-actions">
+        <button class="btn" data-drop="${esc(id)}" title="Drop this exit now. Destroys every flow pinned to it — the failure a teardown fix is judged on.">drop</button>
+        <button class="btn" data-stall="${esc(id)}" title="Make this exit swallow packets without acking or erroring — reproduces the blackhole state so detection can be tested">stall</button>
+        <button class="btn" data-resume="${esc(id)}" title="Un-stall this exit, restoring normal flow">resume</button>
+        <button class="btn" data-migrate="${esc(id)}" title="Hand this exit's movable (established QUIC) flows to live replacements now, while the exit stays alive. Nothing is killed.">migrate</button>
+      </span></td>
+    </tr>`;
+  }).join("");
+  $("exits").innerHTML = `<table><tr><th>exit</th><th>flows</th><th>dial fail</th><th>tier</th><th>proven</th><th></th></tr>${rows}</table>`;
+  // the handlers read id back out of the dataset, so escaping above cannot
+  // break the action buttons
+  document.querySelectorAll("[data-drop]").forEach(b => b.addEventListener("click", () => doAction("drop", b.dataset.drop)));
+  document.querySelectorAll("[data-stall]").forEach(b => b.addEventListener("click", () => doAction("stall", b.dataset.stall, true)));
+  document.querySelectorAll("[data-resume]").forEach(b => b.addEventListener("click", () => doAction("stall", b.dataset.resume, false)));
+  document.querySelectorAll("[data-migrate]").forEach(b => b.addEventListener("click", () => doAction("migrate", b.dataset.migrate)));
+}
+
+async function doAction(action, clientId, stalled) {
+  flash(action + " " + clientId.slice(-8) + "...");
+  try {
+    const body = { action, clientId };
+    if (action === "stall") body.stalled = stalled;
+    const res = await api("/actions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    flash(action + ": " + JSON.stringify(res));
+    setTimeout(refresh, 500);
+  } catch (e) { flash("error: " + e.message); }
+}
+
+// ---- buttons ----
+$("btn-reset-metrics").addEventListener("click", async () => {
+  try { await api("/actions", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ action: "reset-metrics" }) }); flash("metrics reset"); refresh(); } catch (e) { flash("error: " + e.message); }
+});
+$("btn-shuffle").addEventListener("click", async () => {
+  try { await api("/actions", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ action: "shuffle" }) }); flash("shuffled"); refresh(); } catch (e) { flash("error: " + e.message); }
+});
+$("btn-probe-all").addEventListener("click", async () => {
+  try { const r = await api("/actions", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ action: "probe-all" }) }); flash("probed: " + JSON.stringify(r)); setTimeout(refresh, 1000); } catch (e) { flash("error: " + e.message); }
+});
+$("btn-quit").addEventListener("click", async () => {
+  if (!confirm("Quit the socks proxy? This stops the connection and exits.")) return;
+  try {
+    const r = await api("/actions", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ action: "quit" }) });
+    flash("quitting: " + JSON.stringify(r));
+  } catch (e) {
+    // the server may die before the response lands; treat any error as a stop
+    flash("quit requested");
+  }
+});
+
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>
