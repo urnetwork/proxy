@@ -21,7 +21,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 // Embedding binds the route check to exactly the source used by this compilation.
