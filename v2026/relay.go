@@ -28,7 +28,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/v2026"
 )
 
 // aLongTimeAgo is a deadline in the distant past. Setting it forces an in-flight
