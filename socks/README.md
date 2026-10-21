@@ -95,7 +95,7 @@ The proxy server:
 
 ## Requirements
 
-- Go 1.23 or later
+- Go 1.27.3
 - Network connectivity to VPN servers
 - Valid VPN authentication credentials
 
