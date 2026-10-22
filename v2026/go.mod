@@ -1,4 +1,4 @@
-module github.com/urnetwork/proxy
+module github.com/urnetwork/proxy/v2026
 
 go 1.27.3
 
@@ -6,8 +6,8 @@ require (
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/gopacket v1.1.19
-	github.com/urnetwork/connect v0.0.0
-	github.com/urnetwork/userwireguard v0.0.0
+	github.com/urnetwork/connect/v2026 v2026.10.22-1078873780
+	github.com/urnetwork/userwireguard/v2026 v2026.10.22-1078873780
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 )
 
@@ -38,7 +38,7 @@ require (
 	github.com/quic-go/quic-go v0.61.0 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/theodorsm/covert-dtls v1.5.1 // indirect
-	github.com/urnetwork/glog v0.0.0 // indirect
+	github.com/urnetwork/glog/v2026 v2026.10.22-1078873780 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp v0.0.0-20260727155853-b88d891fe743 // indirect
@@ -51,12 +51,6 @@ require (
 	src.agwa.name/tlshacks v0.0.4 // indirect
 )
 
-replace github.com/urnetwork/connect => ../connect
+replace github.com/pion/sctp => ../../connect/sctp
 
-replace github.com/pion/sctp => ../connect/sctp
-
-replace github.com/urnetwork/glog => ../glog
-
-replace github.com/urnetwork/userwireguard => ../userwireguard
-
-replace gvisor.dev/gvisor => ../gvisor
+replace gvisor.dev/gvisor => github.com/urnetwork/gvisor v0.0.0-20261022064944-57c9e137f740

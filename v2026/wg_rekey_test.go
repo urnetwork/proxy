@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/userwireguard/conn"
-	uwgdevice "github.com/urnetwork/userwireguard/device"
-	"github.com/urnetwork/userwireguard/logger"
-	"github.com/urnetwork/userwireguard/tun/tuntest"
+	"github.com/urnetwork/connect/v2026"
+	"github.com/urnetwork/userwireguard/v2026/conn"
+	uwgdevice "github.com/urnetwork/userwireguard/v2026/device"
+	"github.com/urnetwork/userwireguard/v2026/logger"
+	"github.com/urnetwork/userwireguard/v2026/tun/tuntest"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
