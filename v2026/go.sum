@@ -70,6 +70,14 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/theodorsm/covert-dtls v1.5.1 h1:qTp59YIwGpY4eDJbR237R1MAahWLZNryDNknFRGR0FU=
 github.com/theodorsm/covert-dtls v1.5.1/go.mod h1:MTb9IO4aqSxrcrh569UGO4PlC1Yel37M440z+gcm13E=
+github.com/urnetwork/connect/v2026 v2026.10.25-1081686250 h1:7ijVgP8pDROwDAp2vCVISAF7wyK0G+pNRIUVc2PSxjI=
+github.com/urnetwork/connect/v2026 v2026.10.25-1081686250/go.mod h1:MFTu+Xol6eix7plvj8uQSjRgJhwTOCDC2o7fUp6R3AI=
+github.com/urnetwork/glog/v2026 v2026.10.25-1081686250 h1:4VQkEIX79cyy0mpb6w+sHudnzWBX6Kj38lxoAijw1vY=
+github.com/urnetwork/glog/v2026 v2026.10.25-1081686250/go.mod h1:PPRu6m3WuomSyo6fM3J3M5cbCG0aLIjMxeKWaXvo8mY=
+github.com/urnetwork/gvisor v0.0.0-20261022064944-57c9e137f740 h1:ESPq3kZ109CSaEJnpN6dejz2HibS3TEYNqzMTQt3K1M=
+github.com/urnetwork/gvisor v0.0.0-20261022064944-57c9e137f740/go.mod h1:vhr+dKaKG6frtXM4HM1WN+KUr+bCkQsRu6+AP87pTyg=
+github.com/urnetwork/userwireguard/v2026 v2026.10.25-1081686250 h1:2sj4l0EN5OCBxPaDNTpC7Bhm07In/jvwnd3Dc8KQtQE=
+github.com/urnetwork/userwireguard/v2026 v2026.10.25-1081686250/go.mod h1:a+rqO+X2wm2hh/7vRhRXjR8EWgM9KwSDqukLFYzGth4=
 github.com/wlynxg/anet v0.0.5 h1:J3VJGi1gvo0JwZ/P1/Yc/8p63SoW98B5dHkYDmpgvvU=
 github.com/wlynxg/anet v0.0.5/go.mod h1:eay5PRQr7fIVAMbTbchTnO9gG65Hg/uYGdc7mguHxoA=
 go.uber.org/mock v0.5.2 h1:LbtPTcP8A5k9WPXj54PPPbjcI4Y6lhyOZXn+VS7wNko=
