@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	// "strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	uwgtun "github.com/urnetwork/userwireguard/tun"
@@ -95,6 +96,18 @@ func DefaultWgProxySettings() *WgProxySettings {
 		ClientBatchSize:         256,
 		UploadPacketBatchSize:   8,
 		DownloadPacketBatchSize: 64,
+		PeersOnDemand:           false,
+		// keys are rejected 180 s after the handshake that made them, so a
+		// peer this long without one has carried no traffic for minutes
+		PeerIdleTimeout:       10 * time.Minute,
+		PeerEvictInterval:     1 * time.Minute,
+		PeerMissNegativeTtl:   10 * time.Second,
+		PeerMissRatePerSecond: 1024,
+		PeerMissBurst:         2048,
+		// the handler answers from memory; the bound covers scheduling
+		// delay on a saturated host, past which the client's retry (after
+		// RekeyTimeout) finds the peer the late answer created
+		PeerMissHandlerTimeout: 250 * time.Millisecond,
 	}
 }
 
@@ -116,6 +129,27 @@ type WgProxySettings struct {
 	UploadPacketBatchSize int
 	// Maximum already-ready packets returned by one WireGuard read.
 	DownloadPacketBatchSize int
+
+	// PeersOnDemand keeps configured clients out of the device until they
+	// handshake. AddClients then only indexes a client; the device creates
+	// its peer, with the peer's two goroutines and queues, when an
+	// initiation from the client's key arrives (userwireguard's miss
+	// handler), and the proxy removes the peer after PeerIdleTimeout without
+	// a handshake. Peers, goroutines and queues follow use, not
+	// configuration. A client added with an Endpoint gets its peer at once,
+	// since the server may reach it first.
+	PeersOnDemand bool
+	// An on-demand peer with no handshake for this long is removed; checked
+	// every PeerEvictInterval (<= 0 does not check).
+	PeerIdleTimeout   time.Duration
+	PeerEvictInterval time.Duration
+	// How long a refused key is not asked about again, the rate and burst
+	// of miss handler calls, and the longest a handshake worker waits for
+	// one (see userwireguard PeerMissSettings).
+	PeerMissNegativeTtl    time.Duration
+	PeerMissRatePerSecond  float64
+	PeerMissBurst          int
+	PeerMissHandlerTimeout time.Duration
 }
 
 // implements wg device:
@@ -155,6 +189,11 @@ type WgProxy struct {
 	// used as a removal grace cutoff by `RemoveClients`
 	clientAddTimes map[netip.Addr]time.Time
 	activeClients  map[netip.Addr]WgTun
+	// the configured client of each key: what the miss handler answers
+	// from, and how a live peer is named
+	clientKeys map[device.NoisePublicKey]*wgClientKey
+
+	evictedPeerCount atomic.Uint64
 
 	closeActiveClientsOnce sync.Once
 }
@@ -165,6 +204,40 @@ type WgRuntimeStats struct {
 	InboundPeerQueueDropPacketCount       uint64
 	InboundDecryptionQueueDropPacketCount uint64
 	ReceiveRoutineFailureCount            uint64
+}
+
+// WgPeerStats is the device's peer population and, with on-demand peers, the
+// outcomes of the initiations that created and removed them. The counts are
+// cumulative for one WireGuard device generation.
+type WgPeerStats struct {
+	// peers on the device now
+	PeerCount int
+	// initiations from keys without a peer (userwireguard PeerMissStats)
+	PeerMiss device.PeerMissStats
+	// peers removed for idleness
+	EvictedPeerCount uint64
+}
+
+// One configured client's peer configuration, keyed by its public key.
+type wgClientKey struct {
+	addr         netip.Addr
+	presharedKey *device.NoisePresharedKey
+}
+
+func (self *wgClientKey) peerMissConfig() device.PeerMissConfig {
+	return device.PeerMissConfig{
+		PresharedKey: self.presharedKey,
+		AllowedIPs:   []netip.Prefix{netip.PrefixFrom(self.addr, 32)},
+	}
+}
+
+func newWgClientKey(entry *wgPeerEntry) (device.NoisePublicKey, *wgClientKey) {
+	clientKey := &wgClientKey{addr: entry.addr}
+	if entry.peerConfig.PresharedKey != nil {
+		presharedKey := device.NoisePresharedKey(*entry.peerConfig.PresharedKey)
+		clientKey.presharedKey = &presharedKey
+	}
+	return device.NoisePublicKey(entry.peerConfig.PublicKey), clientKey
 }
 
 type wgTunDevice struct {
@@ -230,6 +303,7 @@ func NewWgProxy(ctx context.Context, settings *WgProxySettings) *WgProxy {
 		clients:        map[netip.Addr]*WgClient{},
 		clientAddTimes: map[netip.Addr]time.Time{},
 		activeClients:  map[netip.Addr]WgTun{},
+		clientKeys:     map[device.NoisePublicKey]*wgClientKey{},
 	}
 
 	logger := &logger.Logger{
@@ -241,6 +315,19 @@ func NewWgProxy(ctx context.Context, settings *WgProxySettings) *WgProxy {
 		},
 	}
 	wg.device = device.NewDevice(&wgTunDevice{proxy: wg}, conn.NewDefaultBind(), logger)
+
+	if settings.PeersOnDemand {
+		missSettings := device.DefaultPeerMissSettings()
+		missSettings.Handler = wg.peerMiss
+		missSettings.NegativeTtl = settings.PeerMissNegativeTtl
+		missSettings.RatePerSecond = settings.PeerMissRatePerSecond
+		missSettings.Burst = settings.PeerMissBurst
+		missSettings.HandlerTimeout = settings.PeerMissHandlerTimeout
+		wg.device.SetPeerMissSettings(missSettings)
+		if 0 < settings.PeerEvictInterval && 0 < settings.PeerIdleTimeout {
+			go connect.HandleError(wg.runPeerEviction)
+		}
+	}
 
 	// go connect.HandleError(wg.run)
 
@@ -318,24 +405,53 @@ func (self *WgProxy) SetClients(clients map[netip.Addr]*WgClient) (returnErr err
 	self.controlLock.Lock()
 	defer self.controlLock.Unlock()
 
-	// wipe all peers, then re-apply the given clients in batches. IpcSet runs
-	// outside stateLock (the device is internally synchronized) so the data path
-	// is not blocked while peers are reprogrammed.
-	wipeConfig := wgtypes.Config{
-		ReplacePeers: true,
-		Peers:        []wgtypes.PeerConfig{},
-	}
-	if err := self.device.IpcSet(&wipeConfig); err != nil {
-		return err
-	}
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		clear(self.clients)
-		clear(self.clientAddTimes)
-	}()
+	if self.settings.PeersOnDemand {
+		// replace the index; the live peers of keys that left it go, the
+		// rest stay and keep their sessions
+		var previousKeys map[device.NoisePublicKey]*wgClientKey
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			previousKeys = self.clientKeys
+			self.clientKeys = map[device.NoisePublicKey]*wgClientKey{}
+			clear(self.clients)
+			clear(self.clientAddTimes)
+		}()
+		_, returnErr = self.addClients(clients)
+		removedKeys := []device.NoisePublicKey{}
+		func() {
+			self.stateLock.RLock()
+			defer self.stateLock.RUnlock()
+			for key, previous := range previousKeys {
+				if current, ok := self.clientKeys[key]; !ok || current.addr != previous.addr {
+					removedKeys = append(removedKeys, key)
+				}
+			}
+		}()
+		for _, key := range removedKeys {
+			self.device.RemovePeer(key)
+		}
+	} else {
+		// wipe all peers, then re-apply the given clients in batches. IpcSet runs
+		// outside stateLock (the device is internally synchronized) so the data path
+		// is not blocked while peers are reprogrammed.
+		wipeConfig := wgtypes.Config{
+			ReplacePeers: true,
+			Peers:        []wgtypes.PeerConfig{},
+		}
+		if err := self.device.IpcSet(&wipeConfig); err != nil {
+			return err
+		}
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			clear(self.clients)
+			clear(self.clientAddTimes)
+			clear(self.clientKeys)
+		}()
 
-	_, returnErr = self.addClients(clients)
+		_, returnErr = self.addClients(clients)
+	}
 
 	// reconcile the active tuns against the new client set: drop tuns whose
 	// client was removed, and swap a tun that no longer matches its client's
@@ -424,6 +540,11 @@ func (self *WgProxy) addClients(clients map[netip.Addr]*WgClient) (applied map[n
 	// into the error, but the valid peers are still applied.
 	entries, returnErr := createPeerEntries(clients)
 
+	if self.settings.PeersOnDemand {
+		returnErr = errors.Join(returnErr, self.indexClients(entries, applied))
+		return
+	}
+
 	batchSize := self.settings.ClientBatchSize
 	if batchSize <= 0 {
 		batchSize = len(entries)
@@ -436,6 +557,8 @@ func (self *WgProxy) addClients(clients map[netip.Addr]*WgClient) (applied map[n
 		for _, entry := range batch {
 			self.clients[entry.addr] = entry.client
 			self.clientAddTimes[entry.addr] = now
+			key, clientKey := newWgClientKey(entry)
+			self.clientKeys[key] = clientKey
 			applied[entry.addr] = entry.client
 		}
 	}
@@ -476,6 +599,108 @@ func (self *WgProxy) addClients(clients map[netip.Addr]*WgClient) (applied map[n
 	return
 }
 
+// indexClients records on-demand clients without creating device peers; the
+// device asks peerMiss for a client's configuration at its first initiation.
+// The caller must hold controlLock.
+//
+// Index changes that invalidate a live peer remove it, and its client's next
+// initiation recreates it from the index: an address that now has another
+// key drops the old key, and a key that moved to another address drops the
+// old address. A client with an Endpoint gets its peer at once, with the
+// endpoint, since the server may reach it first (the deploy handoff). Each
+// indexed key's remembered refusal is cleared, so a client created moments
+// before its first handshake is not held back.
+func (self *WgProxy) indexClients(entries []*wgPeerEntry, applied map[netip.Addr]*WgClient) (returnErr error) {
+	type seed struct {
+		key       device.NoisePublicKey
+		clientKey *wgClientKey
+		endpoint  *net.UDPAddr
+	}
+	type detach struct {
+		addr netip.Addr
+		tun  WgTun
+	}
+	staleKeys := []device.NoisePublicKey{}
+	detaches := []detach{}
+	seeds := []seed{}
+	keys := make([]device.NoisePublicKey, 0, len(entries))
+	func() {
+		now := time.Now()
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		for _, entry := range entries {
+			key, clientKey := newWgClientKey(entry)
+			// the address held another key: that key leaves, and so does the
+			// tun attached for it, so the new key's first packet opens its
+			// own client's tun
+			if previous, ok := self.clients[entry.addr]; ok && previous.PublicKey != entry.client.PublicKey {
+				if previousKey, err := wgtypes.ParseKey(previous.PublicKey); err == nil {
+					previousNoiseKey := device.NoisePublicKey(previousKey)
+					if previousClientKey, ok := self.clientKeys[previousNoiseKey]; ok && previousClientKey.addr == entry.addr {
+						delete(self.clientKeys, previousNoiseKey)
+						staleKeys = append(staleKeys, previousNoiseKey)
+					}
+				}
+				if tun, ok := self.activeClients[entry.addr]; ok {
+					detaches = append(detaches, detach{addr: entry.addr, tun: tun})
+					delete(self.activeClients, entry.addr)
+				}
+			}
+			// the key moved from another address: that address leaves
+			if previous, ok := self.clientKeys[key]; ok && previous.addr != entry.addr {
+				delete(self.clients, previous.addr)
+				delete(self.clientAddTimes, previous.addr)
+				if tun, ok := self.activeClients[previous.addr]; ok {
+					detaches = append(detaches, detach{addr: previous.addr, tun: tun})
+					delete(self.activeClients, previous.addr)
+				}
+				staleKeys = append(staleKeys, key)
+			}
+			self.clients[entry.addr] = entry.client
+			self.clientAddTimes[entry.addr] = now
+			self.clientKeys[key] = clientKey
+			applied[entry.addr] = entry.client
+			keys = append(keys, key)
+			if entry.client.Endpoint != nil {
+				seeds = append(seeds, seed{key: key, clientKey: clientKey, endpoint: entry.client.Endpoint})
+			}
+		}
+	}()
+
+	for _, key := range staleKeys {
+		self.device.RemovePeer(key)
+	}
+	for _, d := range detaches {
+		setWgTunReceive(d.tun, d.addr, nil)
+	}
+	for _, key := range keys {
+		self.device.ClearPeerMissRefusal(key)
+	}
+	if 0 < len(seeds) {
+		endpointPeers := make([]wgtypes.PeerConfig, 0, len(seeds))
+		for _, seed := range seeds {
+			if _, err := self.device.AddPeerOnDemand(seed.key, seed.clientKey.peerMissConfig()); err != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("add client %s: %w", seed.clientKey.addr, err))
+				continue
+			}
+			endpointPeers = append(endpointPeers, wgtypes.PeerConfig{
+				PublicKey:  wgtypes.Key(seed.key),
+				UpdateOnly: true,
+				Endpoint:   seed.endpoint,
+			})
+		}
+		if 0 < len(endpointPeers) {
+			if err := self.device.IpcSet(&wgtypes.Config{Peers: endpointPeers}); err != nil {
+				returnErr = errors.Join(returnErr, err)
+			}
+		}
+	}
+	if count := self.device.PeerCount(); (device.MaxPeers*9)/10 <= count {
+		self.log.Warningf("[wg]peer count %d is near the device limit %d\n", count, device.MaxPeers)
+	}
+	return
+}
+
 // Clients returns the registered client addresses with the time each client's
 // config was last applied.
 func (self *WgProxy) Clients() map[netip.Addr]time.Time {
@@ -499,6 +724,88 @@ func (self *WgProxy) RuntimeStats() WgRuntimeStats {
 	}
 }
 
+func (self *WgProxy) PeerStats() WgPeerStats {
+	return WgPeerStats{
+		PeerCount:        self.device.PeerCount(),
+		PeerMiss:         self.device.PeerMissStats(),
+		EvictedPeerCount: self.evictedPeerCount.Load(),
+	}
+}
+
+// PeerCount is the number of peers on the device. With on-demand peers it
+// is the clients that handshook recently, not the configured clients
+// (ClientCount).
+func (self *WgProxy) PeerCount() int {
+	return self.device.PeerCount()
+}
+
+// peerMiss is the device's miss handler: it answers from the client index in
+// memory, so a handshake worker never waits on I/O. A key is accepted exactly
+// when AddClients registered it and RemoveClients has not removed it.
+func (self *WgProxy) peerMiss(publicKey device.NoisePublicKey) (device.PeerMissConfig, bool) {
+	self.stateLock.RLock()
+	clientKey, ok := self.clientKeys[publicKey]
+	self.stateLock.RUnlock()
+	if !ok {
+		return device.PeerMissConfig{}, false
+	}
+	return clientKey.peerMissConfig(), true
+}
+
+func (self *WgProxy) runPeerEviction() {
+	ticker := time.NewTicker(self.settings.PeerEvictInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		self.evictIdlePeers(self.settings.PeerIdleTimeout)
+	}
+}
+
+// evictIdlePeers removes the peers with no handshake within idle and detaches
+// their clients' tuns, and returns how many it removed. The clients stay
+// configured: the next initiation from one recreates its peer.
+func (self *WgProxy) evictIdlePeers(idle time.Duration) int {
+	removed := self.device.RemoveIdlePeers(idle)
+	if len(removed) == 0 {
+		return 0
+	}
+	self.evictedPeerCount.Add(uint64(len(removed)))
+	self.detachKeys(removed)
+	return len(removed)
+}
+
+// detachKeys detaches the active tuns of the given keys' clients from the
+// wg receive channel. A tun stays open: the hosted device has its own
+// lifetime, and the client's next packet attaches it again.
+func (self *WgProxy) detachKeys(keys []device.NoisePublicKey) {
+	type detach struct {
+		addr netip.Addr
+		tun  WgTun
+	}
+	detaches := []detach{}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		for _, key := range keys {
+			clientKey, ok := self.clientKeys[key]
+			if !ok {
+				continue
+			}
+			if tun, ok := self.activeClients[clientKey.addr]; ok {
+				detaches = append(detaches, detach{addr: clientKey.addr, tun: tun})
+				delete(self.activeClients, clientKey.addr)
+			}
+		}
+	}()
+	for _, d := range detaches {
+		setWgTunReceive(d.tun, d.addr, nil)
+	}
+}
+
 // WgPeerStatus is a registered client's live peer session facts: the endpoint
 // the device has learned (or was seeded with) and the last completed
 // handshake. This is the export side of the deploy endpoint handoff
@@ -513,52 +820,52 @@ type WgPeerStatus struct {
 	LastHandshake time.Time
 }
 
-// PeerStatuses reports the live peer status for every registered client,
-// keyed by client ipv4. Clients whose peer the device does not report (e.g.
-// registered concurrently with the read) are omitted.
+// PeerStatuses reports the live peer status for every registered client
+// that has a device peer, keyed by client ipv4. Clients whose peer the device
+// does not report (e.g. registered concurrently with the read, or with no
+// on-demand peer) are omitted. It reads the device's peer snapshots, so its
+// cost follows the device peers, not the configured clients.
 func (self *WgProxy) PeerStatuses() (map[netip.Addr]*WgPeerStatus, error) {
-	wgDevice, err := self.device.IpcGet()
-	if err != nil {
-		return nil, err
-	}
+	snapshots := self.device.PeerSnapshots()
 
-	publicKeyClientIpv4s := func() map[string]netip.Addr {
-		self.stateLock.RLock()
-		defer self.stateLock.RUnlock()
-		publicKeyClientIpv4s := make(map[string]netip.Addr, len(self.clients))
-		for addr, client := range self.clients {
-			publicKeyClientIpv4s[client.PublicKey] = addr
-		}
-		return publicKeyClientIpv4s
-	}()
-
-	peerStatuses := map[netip.Addr]*WgPeerStatus{}
-	for _, wgPeer := range wgDevice.Peers {
-		publicKey := wgPeer.PublicKey.String()
-		addr, ok := publicKeyClientIpv4s[publicKey]
+	self.stateLock.RLock()
+	defer self.stateLock.RUnlock()
+	peerStatuses := make(map[netip.Addr]*WgPeerStatus, len(snapshots))
+	for _, snapshot := range snapshots {
+		clientKey, ok := self.clientKeys[snapshot.PublicKey]
 		if !ok {
 			continue
 		}
-		peerStatuses[addr] = &WgPeerStatus{
-			ClientIpv4:    addr,
-			PublicKey:     publicKey,
-			Endpoint:      wgPeer.Endpoint,
-			LastHandshake: wgPeer.LastHandshakeTime,
+		peerStatus := &WgPeerStatus{
+			ClientIpv4:    clientKey.addr,
+			PublicKey:     wgtypes.Key(snapshot.PublicKey).String(),
+			LastHandshake: snapshot.LastHandshake,
 		}
+		if snapshot.Endpoint.IsValid() {
+			peerStatus.Endpoint = net.UDPAddrFromAddrPort(snapshot.Endpoint)
+		}
+		peerStatuses[clientKey.addr] = peerStatus
 	}
 	return peerStatuses, nil
 }
 
 // SeedEndpoints sets the endpoint on the peers of already registered
 // clients (UpdateOnly: an endpoint for an unregistered client is skipped,
-// never creating a peer). Returns the number of endpoints applied. This is
-// the replacement instance's endpoint restore in the deploy handoff
-// (PROXYDRAIN1.md §3.4); pair with `InitiateHandshake`.
+// never creating a peer). With on-demand peers a registered client's peer is
+// created first, since the server reaches it before it handshakes. Returns
+// the number of endpoints applied. This is the replacement instance's
+// endpoint restore in the deploy handoff (PROXYDRAIN1.md §3.4); pair with
+// `InitiateHandshake`.
 func (self *WgProxy) SeedEndpoints(endpoints map[netip.Addr]*net.UDPAddr) (int, error) {
 	self.controlLock.Lock()
 	defer self.controlLock.Unlock()
 
-	peers := []wgtypes.PeerConfig{}
+	type seed struct {
+		key       device.NoisePublicKey
+		clientKey *wgClientKey
+		endpoint  *net.UDPAddr
+	}
+	seeds := []seed{}
 	func() {
 		self.stateLock.RLock()
 		defer self.stateLock.RUnlock()
@@ -574,15 +881,32 @@ func (self *WgProxy) SeedEndpoints(endpoints map[netip.Addr]*net.UDPAddr) (int, 
 			if err != nil {
 				continue
 			}
-			peers = append(peers, wgtypes.PeerConfig{
-				PublicKey:  publicKey,
-				UpdateOnly: true,
-				Endpoint:   endpoint,
-			})
+			key := device.NoisePublicKey(publicKey)
+			clientKey, ok := self.clientKeys[key]
+			if !ok {
+				continue
+			}
+			seeds = append(seeds, seed{key: key, clientKey: clientKey, endpoint: endpoint})
 		}
 	}()
+
+	var returnErr error
+	peers := []wgtypes.PeerConfig{}
+	for _, seed := range seeds {
+		if self.settings.PeersOnDemand {
+			if _, err := self.device.AddPeerOnDemand(seed.key, seed.clientKey.peerMissConfig()); err != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("seed client %s: %w", seed.clientKey.addr, err))
+				continue
+			}
+		}
+		peers = append(peers, wgtypes.PeerConfig{
+			PublicKey:  wgtypes.Key(seed.key),
+			UpdateOnly: true,
+			Endpoint:   seed.endpoint,
+		})
+	}
 	if len(peers) == 0 {
-		return 0, nil
+		return 0, returnErr
 	}
 
 	config := wgtypes.Config{
@@ -590,9 +914,9 @@ func (self *WgProxy) SeedEndpoints(endpoints map[netip.Addr]*net.UDPAddr) (int, 
 		Peers:        peers,
 	}
 	if err := self.device.IpcSet(&config); err != nil {
-		return 0, err
+		return 0, errors.Join(returnErr, err)
 	}
-	return len(peers), nil
+	return len(peers), returnErr
 }
 
 // InitiateHandshake sends a handshake initiation to the client's peer. The
@@ -619,7 +943,23 @@ func (self *WgProxy) InitiateHandshake(addr netip.Addr) error {
 	if err != nil {
 		return fmt.Errorf("parse public key for %s: %w", addr, err)
 	}
-	peer := self.device.LookupPeer(device.NoisePublicKey(publicKey))
+	key := device.NoisePublicKey(publicKey)
+	peer := self.device.LookupPeer(key)
+	if peer == nil && self.settings.PeersOnDemand {
+		// the server reaches the client first: create its peer, as the
+		// client's own initiation would
+		clientKey := func() *wgClientKey {
+			self.stateLock.RLock()
+			defer self.stateLock.RUnlock()
+			return self.clientKeys[key]
+		}()
+		if clientKey != nil {
+			peer, err = self.device.AddPeerOnDemand(key, clientKey.peerMissConfig())
+			if err != nil {
+				return fmt.Errorf("create peer for %s: %w", addr, err)
+			}
+		}
+	}
 	if peer == nil {
 		return fmt.Errorf("no peer for %s", addr)
 	}
@@ -686,11 +1026,29 @@ func (self *WgProxy) RemoveClients(addedBefore time.Time, addrs ...netip.Addr) (
 		for _, entry := range batch {
 			delete(self.clients, entry.addr)
 			delete(self.clientAddTimes, entry.addr)
+			key := device.NoisePublicKey(entry.peerConfig.PublicKey)
+			if clientKey, ok := self.clientKeys[key]; ok && clientKey.addr == entry.addr {
+				delete(self.clientKeys, key)
+			}
 			if t, ok := self.activeClients[entry.addr]; ok {
 				activeTuns = append(activeTuns, activeTunRemoval{addr: entry.addr, tun: t})
 				delete(self.activeClients, entry.addr)
 			}
 		}
+	}
+
+	if self.settings.PeersOnDemand {
+		// unindex first, so the miss handler refuses the keys, then remove
+		// whatever live peers they have
+		forget(removals)
+		for _, entry := range removals {
+			self.device.RemovePeer(device.NoisePublicKey(entry.peerConfig.PublicKey))
+		}
+		for _, activeTun := range activeTuns {
+			setWgTunReceive(activeTun.tun, activeTun.addr, nil)
+			activeTun.tun.Cancel()
+		}
+		return
 	}
 
 	batchSize := self.settings.ClientBatchSize
