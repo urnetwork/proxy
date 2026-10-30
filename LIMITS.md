@@ -260,9 +260,12 @@ The limits the code imposes, and where they live.
 | http max request body buffered | 2 MiB | `HttpProxy.MaxHttpBodyBytes` |
 | http CONNECT early-bytes buffer | 64 KiB | `maxEarlyClientBytes` |
 | http dial-retry backoff floor | 1s | `minProxyConnectTimeout` |
+| http CONNECT dial-retry backoff cap | 8s | `maxProxyConnectBackoff` |
+| http CONNECT dial budget (then 504) | 30s | `HttpProxy.ProxyConnectBudget` |
 
 Defaults live in `socks5.DefaultSettings`, `proxy.DefaultSocksProxySettings` and
-`proxy.DefaultHttpProxySettings`: **read 30s, write 15s**, connect 30min. Read
+`proxy.DefaultHttpProxySettings`: **read 30s, write 15s**, connect backoff 1s
+doubling inside a 30s budget. Read
 exceeds write deliberately — a read is an idle tunnel waiting for traffic, while a
 write that cannot drain means the peer stopped reading.
 
