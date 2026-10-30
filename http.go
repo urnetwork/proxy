@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -33,6 +34,13 @@ var discardLog = log.New(io.Discard, "", 0)
 // would turn the dial retry into a hot spin that pegs a core.
 const minProxyConnectTimeout = 1 * time.Second
 
+// maxProxyConnectBackoff caps the doubling dial backoff.
+const maxProxyConnectBackoff = 8 * time.Second
+
+// proxyAuthenticateChallenge is the challenge a 407 must carry (RFC 9110),
+// answering a ConnectRefusalUnauthenticated refusal.
+const proxyAuthenticateChallenge = `Basic realm="proxy"`
+
 // maxEarlyClientBytes bounds what a client may send ahead of an established
 // tunnel before the close-watch stops buffering. A client that opportunistically
 // pipelines its TLS ClientHello with the CONNECT sends a few hundred bytes and
@@ -50,10 +58,15 @@ type HttpProxySettings struct {
 	ProxyWriteTimeout time.Duration
 	// ProxyIdleTimeout is the http server's keep-alive idle timeout.
 	ProxyIdleTimeout time.Duration
-	// ProxyConnectTimeout is the backoff between upstream dial attempts. The dial
-	// retries until the client drops, so this paces the retries; it does not bound
-	// them. It is floored at minProxyConnectTimeout.
+	// ProxyConnectTimeout is the first backoff between upstream dial attempts.
+	// Each retry doubles it, up to maxProxyConnectBackoff. It paces the retries;
+	// ProxyConnectBudget bounds them. It is floored at minProxyConnectTimeout.
 	ProxyConnectTimeout time.Duration
+	// ProxyConnectBudget bounds every dial attempt and backoff of one CONNECT.
+	// The dial callback's context carries it as a deadline, so a dial waiting
+	// for its upstream ends with it too. A CONNECT that has not dialed within
+	// it is answered 504. It is floored at minProxyConnectTimeout.
+	ProxyConnectBudget time.Duration
 	// ProxyTlsHandshakeTimeout applies to the plain-http proxy path only.
 	ProxyTlsHandshakeTimeout time.Duration
 	// MaxHttpBodyBytes caps the request body the plain-http path will buffer.
@@ -72,12 +85,17 @@ func DefaultHttpProxySettings() *HttpProxySettings {
 		ProxyReadTimeout:  30 * time.Second,
 		ProxyWriteTimeout: 15 * time.Second,
 		ProxyIdleTimeout:  5 * time.Minute,
-		// A CONNECT retries for the lifetime of the client. Pace transient dial
-		// failures, but retry soon enough to recover inside ordinary client
-		// request deadlines. The previous 30-minute value came from the old
-		// timeout semantics; after this field became a retry interval, one
-		// recoverable dial error effectively became terminal for every client.
-		ProxyConnectTimeout:      minProxyConnectTimeout,
+		// Pace transient dial failures, but retry soon enough to recover inside
+		// ordinary client request deadlines. The previous 30-minute value came
+		// from the old timeout semantics; after this field became a retry
+		// interval, one recoverable dial error effectively became terminal for
+		// every client.
+		ProxyConnectTimeout: minProxyConnectTimeout,
+		// Attempts start at 0, 1, 3, 7, 15 and 23 seconds, and the 504 comes
+		// at 30. A CONNECT used to retry for the life of its client, and
+		// clients that never hang up held tens of thousands of retrying
+		// CONNECTs open (2026-10-30).
+		ProxyConnectBudget:       30 * time.Second,
 		ProxyTlsHandshakeTimeout: 30 * time.Second,
 		MaxHttpBodyBytes:         2 * 1024 * 1024,
 		StatsLogInterval:         DefaultStatsLogInterval,
@@ -113,6 +131,61 @@ func NewHttpProxyWithDefaults() *HttpProxy {
 
 func (self *HttpProxy) Settings() *HttpProxySettings {
 	return self.settings
+}
+
+// ConnectRefusalClass is why a dial callback refused a request. The set is
+// closed: each class has its own status and its own counter in HttpStats.
+type ConnectRefusalClass int
+
+const (
+	// The request carries no credential the proxy accepts. Answered 407.
+	ConnectRefusalUnauthenticated ConnectRefusalClass = iota + 1
+	// The credential is valid but may not be used for this request, for
+	// example from outside its ip lock. Answered 403.
+	ConnectRefusalForbidden
+	// The credential names a proxy that does not exist: unknown, removed or
+	// expired. Answered 502.
+	ConnectRefusalUnknownProxy
+	// Every attempt was reset, by the destination or by a policy on the way
+	// to it. Answered 502.
+	ConnectRefusalReset
+	// The destination name does not exist. Answered 502.
+	ConnectRefusalNoSuchHost
+)
+
+// ConnectRefusal is a dial failure that no retry can change. A dial callback
+// returns one (see NewConnectRefusal), and the request is answered with the
+// class's status at once instead of being retried.
+type ConnectRefusal struct {
+	Class ConnectRefusalClass
+	Err   error
+}
+
+func NewConnectRefusal(class ConnectRefusalClass, err error) error {
+	return &ConnectRefusal{
+		Class: class,
+		Err:   err,
+	}
+}
+
+func (self *ConnectRefusal) Error() string {
+	return self.Err.Error()
+}
+
+func (self *ConnectRefusal) Unwrap() error {
+	return self.Err
+}
+
+// StatusCode is the status the refused request is answered with.
+func (self *ConnectRefusal) StatusCode() int {
+	switch self.Class {
+	case ConnectRefusalUnauthenticated:
+		return http.StatusProxyAuthRequired
+	case ConnectRefusalForbidden:
+		return http.StatusForbidden
+	default:
+		return http.StatusBadGateway
+	}
 }
 
 func (self *HttpProxy) connectDial(ctx context.Context, r *http.Request, network string, addr string) (net.Conn, error) {
@@ -164,6 +237,13 @@ func (self *HttpProxy) proxyConnectTimeout() time.Duration {
 		return minProxyConnectTimeout
 	}
 	return self.settings.ProxyConnectTimeout
+}
+
+func (self *HttpProxy) proxyConnectBudget() time.Duration {
+	if self.settings.ProxyConnectBudget < minProxyConnectTimeout {
+		return minProxyConnectTimeout
+	}
+	return self.settings.ProxyConnectBudget
 }
 
 // Listens for plain http; the serving scope owns the listener until hard shutdown.
@@ -377,24 +457,50 @@ func (self *HttpProxy) handleHttps(w http.ResponseWriter, r *http.Request) {
 		watch.stop()
 	}()
 
+	// One budget bounds every attempt and backoff. The dial context carries it,
+	// so an attempt waiting on its upstream ends with it, and a CONNECT that
+	// cannot dial inside it is answered rather than retried for the life of a
+	// client that never hangs up.
+	dialCtx, dialCancel := context.WithTimeout(handleCtx, self.proxyConnectBudget())
+	defer dialCancel()
+
 	// r.URL.Host contains both the host and port (if specified)
 	var proxyConn net.Conn
+	backoff := self.proxyConnectTimeout()
 	for {
-		reconnect := connect.NewPacedReconnect(self.proxyConnectTimeout())
-		proxyConn, err = self.connectDial(handleCtx, r, "tcp", r.URL.Host)
+		reconnect := connect.NewPacedReconnect(backoff)
+		proxyConn, err = self.connectDial(dialCtx, r, "tcp", r.URL.Host)
 		if err == nil {
 			break
 		}
 		self.stats.ConnectDialErrors.Add(1)
-		select {
-		case <-handleCtx.Done():
-			// the client dropped the CONNECT, or the proxy is shutting down
-			self.stats.ConnectClientsGone.Add(1)
+		var refusal *ConnectRefusal
+		if errors.As(err, &refusal) {
+			// no retry can change a refusal
+			self.stats.countRefusal(refusal.Class)
 			watch.stop()
-			httpError(conn, http.StatusBadGateway, err)
+			httpError(conn, refusal.StatusCode(), err)
 			return
+		}
+		select {
+		case <-dialCtx.Done():
 		case <-reconnect.After():
 		}
+		// checked after the wait: an attempt that ended with the budget also
+		// finds its backoff elapsed, and must not dial again
+		if dialCtx.Err() != nil {
+			watch.stop()
+			if handleCtx.Err() != nil {
+				// the client dropped the CONNECT, or the proxy is shutting down
+				self.stats.ConnectClientsGone.Add(1)
+				httpError(conn, http.StatusBadGateway, err)
+			} else {
+				self.stats.ConnectTimeouts.Add(1)
+				httpError(conn, http.StatusGatewayTimeout, err)
+			}
+			return
+		}
+		backoff = min(2*backoff, max(backoff, maxProxyConnectBackoff))
 	}
 	defer proxyConn.Close()
 
@@ -480,6 +586,16 @@ func (self *HttpProxy) handleHttp(w http.ResponseWriter, r *http.Request) {
 		}
 		if dialFailed.Load() {
 			self.stats.RequestDialErrors.Add(1)
+			var refusal *ConnectRefusal
+			if errors.As(err, &refusal) {
+				// no retry can change a refusal
+				self.stats.countRefusal(refusal.Class)
+				if refusal.StatusCode() == http.StatusProxyAuthRequired {
+					w.Header().Set("Proxy-Authenticate", proxyAuthenticateChallenge)
+				}
+				http.Error(w, err.Error(), refusal.StatusCode())
+				return
+			}
 		}
 		if !dialFailed.Load() && !isReplayable(r) {
 			self.stats.RequestsNotReplayed.Add(1)
@@ -721,10 +837,16 @@ func removeProxyRequestHeaders(h http.Header) {
 // for a hijacked connection
 func httpError(w io.Writer, statusCode int, err error) error {
 	errorMessage := err.Error()
+	// a 407 must carry the challenge the client answers
+	challenge := ""
+	if statusCode == http.StatusProxyAuthRequired {
+		challenge = fmt.Sprintf("Proxy-Authenticate: %s\r\n", proxyAuthenticateChallenge)
+	}
 	errStr := fmt.Sprintf(
-		"HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s",
+		"HTTP/1.1 %d %s\r\n%sContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s",
 		statusCode,
 		http.StatusText(statusCode),
+		challenge,
 		len(errorMessage),
 		errorMessage,
 	)
