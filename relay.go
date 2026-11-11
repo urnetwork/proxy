@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -80,7 +81,9 @@ type relayEndpoint struct {
 
 // relayConfig tunes a relay.
 type relayConfig struct {
-	Buffers      relayBuffers
+	Buffers relayBuffers
+	// ReadTimeout bounds per-read inactivity for standalone copies and shared
+	// inactivity across both directions for a tunnel.
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 
@@ -110,12 +113,98 @@ type readDeadliner interface{ SetReadDeadline(time.Time) error }
 type writeDeadliner interface{ SetWriteDeadline(time.Time) error }
 type closeWriter interface{ CloseWrite() error }
 
+// One timer owns bidirectional read-idle expiry without a parked watcher.
+// Each scheduled callback is prepaid before publication and joined on exit.
+// Packet progress changes only the timestamp; it does not reset a hot timer
+// or transiently expire a TLS read while the other direction remains active.
+// Progress and terminal methods are concurrent-safe; the owner stops once,
+// after joining both copy directions.
+type relayReadIdle struct {
+	stateLock    sync.Mutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	timeout      time.Duration
+	lastActivity time.Time
+	timer        *time.Timer
+	workers      sync.WaitGroup
+	stopped      bool
+	timedOut     bool
+}
+
+// The timer starts only after cancellation owns the relay's endpoints.
+func newRelayReadIdle(ctx context.Context, cancel context.CancelFunc, timeout time.Duration) *relayReadIdle {
+	self := &relayReadIdle{ctx: ctx, cancel: cancel, timeout: timeout, lastActivity: time.Now()}
+	self.stateLock.Lock()
+	self.workers.Add(1)
+	self.timer = time.AfterFunc(timeout, self.expire)
+	self.stateLock.Unlock()
+	return self
+}
+
+// Successful reads and writes in either direction refresh the same idle edge.
+func (self *relayReadIdle) touch() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if !self.stopped {
+		self.lastActivity = time.Now()
+	}
+}
+
+// A callback either prepays its successor or commits the first idle expiry.
+// Cancellation and endpoint methods run outside the state lock.
+func (self *relayReadIdle) expire() {
+	defer self.workers.Done()
+	expired := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.stopped || self.ctx.Err() != nil {
+			return false
+		}
+		remaining := self.timeout - time.Since(self.lastActivity)
+		if remaining > 0 {
+			self.workers.Add(1)
+			self.timer = time.AfterFunc(remaining, self.expire)
+			return false
+		}
+		self.stopped, self.timedOut = true, true
+		return true
+	}()
+	if expired {
+		self.cancel()
+	}
+}
+
+// A copy result and idle expiry arbitrate before either cancels its sibling.
+// Return the standard timeout error when the idle timer committed first,
+// retaining net.Error timeout semantics rather than a filtered cancellation.
+func (self *relayReadIdle) finish(err error) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.timedOut {
+		return os.ErrDeadlineExceeded
+	}
+	self.stopped = true
+	return err
+}
+
+// Stopping cancels the pending callback's prepaid owner; running callbacks own
+// their own completion. The lock prevents a new Add after Wait can begin.
+func (self *relayReadIdle) stopAndJoin() {
+	self.stateLock.Lock()
+	self.stopped = true
+	if self.timer.Stop() {
+		self.workers.Done()
+	}
+	self.stateLock.Unlock()
+	self.workers.Wait()
+}
+
 // relayCopy copies src to dst until EOF, error, or ctx cancellation, applying
 // readTimeout before each read and writeTimeout before each write when the
 // endpoints support deadlines. flush, when non-nil, is called after each write.
 //
-// Deadlines are never re-armed once ctx is done, so a canceled copy cannot be
-// kept alive indefinitely by a stream that keeps delivering data.
+// Cancellation observed across a deadline arm restores that direction's
+// poison before more I/O, including standalone and zero-read-timeout copies.
 func relayCopy(
 	ctx context.Context,
 	dst io.Writer,
@@ -125,24 +214,81 @@ func relayCopy(
 	writeTimeout time.Duration,
 	flush func(),
 ) (written int64, err error) {
+	return relayCopyWithReadIdle(ctx, dst, src, bufs, readTimeout, writeTimeout, flush, nil)
+}
+
+// Standalone copies keep per-read deadlines. A bidirectional owner supplies
+// shared activity and clears inherited handshake read deadlines once instead.
+func relayCopyWithReadIdle(
+	ctx context.Context,
+	dst io.Writer,
+	src io.Reader,
+	bufs relayBuffers,
+	readTimeout time.Duration,
+	writeTimeout time.Duration,
+	flush func(),
+	idle *relayReadIdle,
+) (written int64, err error) {
 	buf := bufs.Get()
 	defer bufs.Put(buf)
 
+	readDeadline, hasReadDeadline := src.(readDeadliner)
+	writeDeadline, hasWriteDeadline := dst.(writeDeadliner)
+	readDeadlineChanged, writeDeadlineChanged := false, false
+	// Restore only deadline directions this copy programmed. An endpoint that
+	// merely exposes a setter must retain its unrelated owner's deadline.
+	checkCanceled := func() error {
+		err := ctx.Err()
+		if err != nil {
+			if readDeadlineChanged {
+				readDeadline.SetReadDeadline(aLongTimeAgo)
+			}
+			if writeDeadlineChanged {
+				writeDeadline.SetWriteDeadline(aLongTimeAgo)
+			}
+		}
+		return err
+	}
+	if err := checkCanceled(); err != nil {
+		return written, err
+	}
+	if idle != nil {
+		if hasReadDeadline {
+			readDeadlineChanged = true
+			readDeadline.SetReadDeadline(time.Time{})
+		}
+	}
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := checkCanceled(); err != nil {
 			return written, err
 		}
 		if 0 < readTimeout {
-			if c, ok := src.(readDeadliner); ok {
-				c.SetReadDeadline(time.Now().Add(readTimeout))
+			if hasReadDeadline {
+				readDeadlineChanged = true
+				readDeadline.SetReadDeadline(time.Now().Add(readTimeout))
 			}
+		}
+		// A late read arm or inherited-deadline clear must not overwrite the
+		// cancellation poison and then enter Read in any copy mode.
+		if err := checkCanceled(); err != nil {
+			return written, err
 		}
 		nr, er := src.Read(buf)
 		if 0 < nr {
+			if idle != nil {
+				idle.touch()
+			}
+			if err := checkCanceled(); err != nil {
+				return written, err
+			}
 			if 0 < writeTimeout {
-				if c, ok := dst.(writeDeadliner); ok {
-					c.SetWriteDeadline(time.Now().Add(writeTimeout))
+				if hasWriteDeadline {
+					writeDeadlineChanged = true
+					writeDeadline.SetWriteDeadline(time.Now().Add(writeTimeout))
 				}
+			}
+			if err := checkCanceled(); err != nil {
+				return written, err
 			}
 			nw, ew := dst.Write(buf[0:nr])
 			if nw < 0 || nr < nw {
@@ -152,6 +298,9 @@ func relayCopy(
 				}
 			}
 			written += int64(nw)
+			if idle != nil && nw > 0 {
+				idle.touch()
+			}
 			if ew != nil {
 				return written, ew
 			}
@@ -193,6 +342,7 @@ func relayBidi(
 	halfClose := config.halfClose()
 
 	errs := make(chan error, 2)
+	var readIdle *relayReadIdle
 
 	// copyDir relays src->dst and then decides whether the relay as a whole is
 	// over. It is the only place teardown is triggered by a direction ending.
@@ -204,17 +354,25 @@ func relayBidi(
 				cancel()
 			}
 		}()
-		_, err := relayCopy(ctx, dst, src, config.Buffers, config.ReadTimeout, config.WriteTimeout, nil)
-		errs <- err
+		readTimeout := config.ReadTimeout
+		if readIdle != nil {
+			readTimeout = 0
+		}
+		_, err := relayCopyWithReadIdle(ctx, dst, src, config.Buffers, readTimeout, config.WriteTimeout, nil, readIdle)
 		if err == nil && halfClose {
 			if closer, ok := dst.(closeWriter); ok {
 				// a clean end of stream: pass the FIN through and let the peer keep
 				// sending. The relay ends once BOTH directions are done.
 				closer.CloseWrite()
+				errs <- nil
 				completed = true
 				return
 			}
 		}
+		if readIdle != nil {
+			err = readIdle.finish(err)
+		}
+		errs <- err
 		cancel()
 		completed = true
 	}
@@ -228,6 +386,9 @@ func relayBidi(
 	stop := afterFuncAndJoin(ctx, func() {
 		relayForceUnblock(a.Reader, a.Writer, b.Reader, b.Writer)
 	})
+	if config.ReadTimeout > 0 {
+		readIdle = newRelayReadIdle(ctx, cancel, config.ReadTimeout)
+	}
 	var wg sync.WaitGroup
 	completed := false
 	defer func() {
@@ -236,6 +397,9 @@ func relayBidi(
 		}
 		// The caller may Goexit before reaching the ordinary wait below.
 		wg.Wait()
+		if readIdle != nil {
+			readIdle.stopAndJoin()
+		}
 		stop()
 	}()
 	wg.Add(1)
