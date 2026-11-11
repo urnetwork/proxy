@@ -125,24 +125,17 @@ Options:
 			return fmt.Errorf("login failed: %w", err)
 		}
 
-		locations, err := getProviderLocations(
+		providersSpec, err := resolveProviderSpec(
 			ctx,
 			cfg.apiURL,
 			jwt,
-		)
-		if err != nil {
-			return fmt.Errorf("get locations failed: %w", err)
-		}
-
-		providersSpec, err := getProviderSpec(
-			locations,
 			cfg.city,
 			cfg.country,
 			cfg.region,
 			cfg.providerID,
 		)
 		if err != nil {
-			return fmt.Errorf("get provider spec failed: %w", err)
+			return err
 		}
 
 		clientJWT, err := authNetworkClient(
@@ -286,6 +279,79 @@ func socksCredentialValidator(socksUser string, socksPass string) func(user stri
 		userOk := subtle.ConstantTimeCompare([]byte(user), []byte(socksUser)) == 1
 		passOk := subtle.ConstantTimeCompare([]byte(password), []byte(socksPass)) == 1
 		return userOk && passOk
+	}
+}
+
+// resolveProviderSpec resolves the requested location to provider specs.
+// The initial provider-locations listing only contains countries, so a city
+// or region is not in it; query the search endpoint for each requested name
+// and merge the matches before resolving the spec.
+func resolveProviderSpec(
+	ctx context.Context,
+	apiURL string,
+	jwt string,
+	city string,
+	country string,
+	region string,
+	providerID string,
+) ([]*connect.ProviderSpec, error) {
+	locations, err := getProviderLocations(ctx, apiURL, jwt)
+	if err != nil {
+		return nil, fmt.Errorf("get locations failed: %w", err)
+	}
+
+	if providerID == "" {
+		var queries []string
+		if city != "" {
+			queries = append(queries, city)
+		}
+		if region != "" {
+			queries = append(queries, region)
+		}
+		for _, query := range queries {
+			searchLocations, err := findProviderLocations(
+				ctx,
+				apiURL,
+				jwt,
+				&FindLocationsArgs{Query: query},
+			)
+			if err != nil {
+				return nil, fmt.Errorf("find locations for %q failed: %w", query, err)
+			}
+			mergeLocations(locations, searchLocations)
+		}
+	}
+
+	providersSpec, err := getProviderSpec(locations, city, country, region, providerID)
+	if err != nil {
+		return nil, fmt.Errorf("get provider spec failed: %w", err)
+	}
+	return providersSpec, nil
+}
+
+// mergeLocations appends the locations in extra to base, dropping duplicates
+// by location id. The initial listing and a search result overlap on the
+// parent country, and a search can return the same entry more than once.
+func mergeLocations(base *FindLocationsResult, extra *FindLocationsResult) {
+	if extra == nil || extra.Locations == nil {
+		return
+	}
+	if base.Locations == nil {
+		base.Locations = &LocationResultList{}
+	}
+
+	seen := map[connect.Id]bool{}
+	for _, location := range base.Locations.values {
+		if location.LocationId != nil {
+			seen[*location.LocationId] = true
+		}
+	}
+	for _, location := range extra.Locations.values {
+		if location.LocationId == nil || seen[*location.LocationId] {
+			continue
+		}
+		base.Locations.values = append(base.Locations.values, location)
+		seen[*location.LocationId] = true
 	}
 }
 
@@ -460,6 +526,29 @@ func getProviderLocations(ctx context.Context, apiURL string, jwt string) (*Find
 		ctx,
 		strategy,
 		fmt.Sprintf("%s/network/provider-locations", apiURL),
+		jwt,
+		&FindLocationsResult{},
+		connect.NewNoopApiCallback[*FindLocationsResult](),
+	)
+
+}
+
+// findProviderLocations searches city and region names. The initial listing
+// from getProviderLocations only contains countries.
+func findProviderLocations(
+	ctx context.Context,
+	apiURL string,
+	jwt string,
+	args *FindLocationsArgs,
+) (*FindLocationsResult, error) {
+
+	strategy := connect.NewClientStrategyWithDefaults(ctx)
+
+	return connect.HttpPostWithStrategy(
+		ctx,
+		strategy,
+		fmt.Sprintf("%s/network/find-provider-locations", apiURL),
+		args,
 		jwt,
 		&FindLocationsResult{},
 		connect.NewNoopApiCallback[*FindLocationsResult](),
