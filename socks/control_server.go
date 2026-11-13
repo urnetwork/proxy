@@ -177,7 +177,12 @@ func (self *controlServer) handleSettings(w http.ResponseWriter, r *http.Request
 		}
 		// start from current so unset fields are preserved
 		self.stateLock.Lock()
-		merged := mergeReliabilitySettings(self.mc.ReliabilitySettings(), f)
+		merged, err := mergeReliabilitySettings(self.mc.ReliabilitySettings(), f)
+		if err != nil {
+			self.stateLock.Unlock()
+			writeJson(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		self.mc.SetReliabilitySettings(merged)
 		out := settingsToFile(self.mc.ReliabilitySettings())
 		self.stateLock.Unlock()

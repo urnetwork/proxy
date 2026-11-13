@@ -283,13 +283,18 @@ func mustParseId(t *testing.T, s string) connect.Id {
 }
 
 func TestParseMetricsEvery(t *testing.T) {
-	for value, want := range map[string]int{"0": 0, "1": 1, "5000": 5000} {
+	for value, want := range map[string]int64{"0": 0, "1": 1, "5000": 5000} {
 		got, err := parseMetricsEvery(value)
 		if err != nil || got != want {
 			t.Errorf("parseMetricsEvery(%q) = %d, %v, want %d", value, got, err, want)
 		}
 	}
-	for _, value := range []string{"-1", "abc", "1.5", " 5"} {
+	// 9223372036855 ms wraps time.Duration negative, and time.NewTicker panics
+	// on it. 9223372036854 ms is the largest value that fits.
+	if got, err := parseMetricsEvery("9223372036854"); err != nil || got != 9223372036854 {
+		t.Errorf("parseMetricsEvery(max) = %d, %v, want it accepted", got, err)
+	}
+	for _, value := range []string{"-1", "abc", "1.5", " 5", "9223372036855", "9223372036854775807"} {
 		if got, err := parseMetricsEvery(value); err == nil {
 			t.Errorf("parseMetricsEvery(%q) = %d, want an error", value, got)
 		}

@@ -102,7 +102,10 @@ func TestMergeReliabilitySettingsPreservesBase(t *testing.T) {
 		MaxFlowsPerExit:         16,
 		BlackholeReceiveTimeout: 20 * time.Second,
 	}
-	s := mergeReliabilitySettings(base, reliabilityFile{MaxFlowsPerExit: intPtr(64)})
+	s, err := mergeReliabilitySettings(base, reliabilityFile{MaxFlowsPerExit: intPtr(64)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if s.MaxFlowsPerExit != 64 {
 		t.Errorf("MaxFlowsPerExit = %d, want 64", s.MaxFlowsPerExit)
 	}

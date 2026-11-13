@@ -3,7 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -178,14 +181,48 @@ func applyFileToSettings(dst *connect.ReliabilitySettings, f *reliabilityFile) {
 
 }
 
+// maxReliabilityMs is the largest millisecond value that still fits a
+// time.Duration (about 292 years).
+const maxReliabilityMs = math.MaxInt64 / int64(time.Millisecond)
+
+// validateReliabilityFile refuses a duration that is negative or too large for
+// time.Duration. Past the limit the conversion wraps to a negative duration,
+// and time.NewTicker panics on one. It walks the file shape by reflection, so a
+// duration field added later is covered as long as its name ends in Ms.
+func validateReliabilityFile(f *reliabilityFile) error {
+	if f == nil {
+		return nil
+	}
+	v := reflect.ValueOf(f).Elem()
+	typ := v.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		name := typ.Field(i).Name
+		if !strings.HasSuffix(name, "Ms") || v.Field(i).IsNil() {
+			continue
+		}
+		ms, ok := v.Field(i).Interface().(*int64)
+		if !ok {
+			return fmt.Errorf("%s is not an int64 millisecond value", name)
+		}
+		if *ms < 0 || *ms > maxReliabilityMs {
+			return fmt.Errorf("%s = %d ms is out of range, it must be between 0 and %d", name, *ms, maxReliabilityMs)
+		}
+	}
+	return nil
+}
+
 // mergeReliabilitySettings returns a copy of cur with the fields f names
 // overwritten. A field f does not name keeps its current value, including the
-// fields the file shape has no entry for.
-func mergeReliabilitySettings(cur *connect.ReliabilitySettings, f reliabilityFile) *connect.ReliabilitySettings {
+// fields the file shape has no entry for. It refuses an out-of-range duration
+// and changes nothing in that case.
+func mergeReliabilitySettings(cur *connect.ReliabilitySettings, f reliabilityFile) (*connect.ReliabilitySettings, error) {
+	if err := validateReliabilityFile(&f); err != nil {
+		return nil, err
+	}
 	merged := connect.ReliabilitySettings{}
 	if cur != nil {
 		merged = *cur
 	}
 	applyFileToSettings(&merged, &f)
-	return &merged
+	return &merged, nil
 }

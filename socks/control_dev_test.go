@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"runtime"
@@ -568,5 +569,37 @@ func TestControlServeEndsItsWaiterWhenServeFails(t *testing.T) {
 			t.Fatal("the serve waiter goroutine is still running with ctx live")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestControlPutSettingsRefusesBadDuration covers a PUT whose millisecond value
+// is negative or wraps time.Duration: the answer is a 400 that names the
+// field, and the settings stay as they were.
+func TestControlPutSettingsRefusesBadDuration(t *testing.T) {
+	cur := &connect.ReliabilitySettings{MaxFlowsPerExit: 7}
+	mc := &fakeMc{settings: cur}
+	_, srv := startTestControl(t, mc)
+
+	for _, body := range []string{
+		`{"sendStallTimeoutMs": -1}`,
+		`{"heartbeatIntervalMs": 9223372036855}`,
+		`{"maxFlowsPerExit": 64, "probeTimeoutMs": 9223372036854775807}`,
+	} {
+		req, _ := http.NewRequest("PUT", srv.URL+"/settings", strings.NewReader(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("PUT %s = %d, want 400", body, resp.StatusCode)
+		}
+		if !strings.Contains(string(msg), "Ms") {
+			t.Errorf("PUT %s answered %q, want the field named", body, msg)
+		}
+		if mc.settings != cur || cur.MaxFlowsPerExit != 7 {
+			t.Errorf("PUT %s changed the settings", body)
+		}
 	}
 }

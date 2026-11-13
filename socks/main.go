@@ -55,7 +55,7 @@ func main() {
 		region         string
 		socksUser      string
 		socksPass      string
-		metricsEveryMs int
+		metricsEveryMs int64
 		resetMetrics   bool
 		reliability    string
 		control        string
@@ -244,7 +244,11 @@ Options:
 			if err != nil {
 				return fmt.Errorf("reliability settings: %w", err)
 			}
-			mc.SetReliabilitySettings(mergeReliabilitySettings(mc.ReliabilitySettings(), *f))
+			settings, err := mergeReliabilitySettings(mc.ReliabilitySettings(), *f)
+			if err != nil {
+				return fmt.Errorf("reliability settings: %w", err)
+			}
+			mc.SetReliabilitySettings(settings)
 			fmt.Printf("reliability settings loaded from %s\n", cfg.reliability)
 		}
 
@@ -341,10 +345,10 @@ func isLoopbackListenAddr(addr string) bool {
 
 // parseMetricsEvery reads a --metrics-every value in milliseconds. Zero means
 // the printer is off, as the usage text says.
-func parseMetricsEvery(value string) (int, error) {
-	ms, err := strconv.Atoi(value)
-	if err != nil || ms < 0 {
-		return 0, errors.New("--metrics-every must be 0 (off) or a positive millisecond value")
+func parseMetricsEvery(value string) (int64, error) {
+	ms, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || ms < 0 || ms > maxReliabilityMs {
+		return 0, fmt.Errorf("--metrics-every must be 0 (off) or a millisecond value up to %d", maxReliabilityMs)
 	}
 	return ms, nil
 }
