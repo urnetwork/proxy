@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -112,12 +111,7 @@ func TestControlPutSettingsKeepsUnnamedFields(t *testing.T) {
 	fillReliabilitySettings(t, cur)
 	before := *cur
 	mc := &fakeMC{settings: cur}
-	c, err := newControlServer("127.0.0.1:0", mc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(c.server.Handler)
-	defer srv.Close()
+	_, srv := startTestControl(t, mc)
 
 	req, _ := http.NewRequest("PUT", srv.URL+"/settings", strings.NewReader(`{"maxFlowsPerExit": 64}`))
 	resp, err := http.DefaultClient.Do(req)

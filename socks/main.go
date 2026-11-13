@@ -267,22 +267,18 @@ Options:
 		}
 
 		if cfg.control != "" {
-			// the control server is unauthenticated and can change settings,
-			// drop exits, and migrate flows -- refuse non-loopback binds
-			ok, err := controlAddrIsLoopback(cfg.control)
+			ln, err := listenControl(cfg.control)
 			if err != nil {
-				return fmt.Errorf("control address: %w", err)
+				return err
 			}
-			if !ok {
-				return fmt.Errorf("control address %q must be loopback; the control server is unauthenticated", cfg.control)
-			}
-			server, err := newControlServer(cfg.control, mc)
+			server, err := newControlServer(ln, mc)
 			if err != nil {
+				ln.Close()
 				return fmt.Errorf("control server: %w", err)
 			}
 			server.SetCancel(stop)
 			go server.serve(ctx)
-			fmt.Printf("control server listening on %s\n", cfg.control)
+			fmt.Printf("control server listening on %s\n", ln.Addr())
 		}
 
 		if cfg.resetMetrics {
@@ -484,6 +480,27 @@ func controlAddrIsLoopback(addr string) (bool, error) {
 		return false, nil
 	}
 	return true, nil
+}
+
+// listenControl binds the control address before anything else starts, so a
+// port that is taken stops the proxy with an error. The control server is
+// unauthenticated and can change settings, drop exits and migrate flows, so a
+// non-loopback address is refused before it is bound, and newControlServer
+// checks the bound address again because a name such as localhost can resolve
+// to something else.
+func listenControl(addr string) (net.Listener, error) {
+	ok, err := controlAddrIsLoopback(addr)
+	if err != nil {
+		return nil, fmt.Errorf("control address: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("control address %q must be loopback; the control server is unauthenticated", addr)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("control server: %w", err)
+	}
+	return ln, nil
 }
 
 // resolveProviderSpec resolves the requested location to provider specs.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -213,12 +214,7 @@ func TestLoginWithAuthCodeError(t *testing.T) {
 
 func TestControlSettingsBadJSON(t *testing.T) {
 	mc := &fakeMC{}
-	c, err := newControlServer("127.0.0.1:0", mc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(c.server.Handler)
-	defer srv.Close()
+	_, srv := startTestControl(t, mc)
 
 	req, _ := http.NewRequest("PUT", srv.URL+"/settings", strings.NewReader("{not json"))
 	resp, err := http.DefaultClient.Do(req)
@@ -233,12 +229,7 @@ func TestControlSettingsBadJSON(t *testing.T) {
 
 func TestControlActionsStallMigrate(t *testing.T) {
 	mc := &fakeMC{}
-	c, err := newControlServer("127.0.0.1:0", mc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(c.server.Handler)
-	defer srv.Close()
+	_, srv := startTestControl(t, mc)
 
 	cid := "019fde39-e690-add0-ac88-e354a0d76d6a"
 
@@ -277,14 +268,9 @@ func TestControlActionsStallMigrate(t *testing.T) {
 // TestControlQuitAction verifies the quit action invokes the wired cancel.
 func TestControlQuitAction(t *testing.T) {
 	mc := &fakeMC{}
-	c, err := newControlServer("127.0.0.1:0", mc)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c, srv := startTestControl(t, mc)
 	cancelled := false
 	c.SetCancel(func() { cancelled = true })
-	srv := httptest.NewServer(c.server.Handler)
-	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/actions", "application/json", strings.NewReader(`{"action":"quit"}`))
 	if err != nil {
@@ -303,12 +289,7 @@ func TestControlQuitAction(t *testing.T) {
 
 func TestControlStatsEndpoint(t *testing.T) {
 	mc := &fakeMC{}
-	c, err := newControlServer("127.0.0.1:0", mc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(c.server.Handler)
-	defer srv.Close()
+	_, srv := startTestControl(t, mc)
 
 	resp, err := http.Get(srv.URL + "/stats")
 	if err != nil {
@@ -336,19 +317,30 @@ func TestControlStatsEndpoint(t *testing.T) {
 // --- serve() shutdown on context cancel ---
 
 func TestControlServerServeShutdown(t *testing.T) {
-	mc := &fakeMC{}
-	// port 0 = ephemeral; we only verify the goroutine exits on ctx cancel
-	c, err := newControlServer("127.0.0.1:0", mc)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := newControlServer(ln, &fakeMC{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		c.serve(ctx)
 		close(done)
 	}()
-	time.Sleep(50 * time.Millisecond)
+
+	// A completed request shows the serve loop is up, so no sleep is needed.
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + ln.Addr().String() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
 	cancel()
 	select {
 	case <-done:

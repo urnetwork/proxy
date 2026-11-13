@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,11 +47,13 @@ type mcControl interface {
 // cannot drive the control plane (same class as the webpack-dev-server
 // drive-by-localhost CVEs).
 type controlServer struct {
-	server  *http.Server
-	mc      mcControl
-	mu      sync.Mutex         // serializes the read-merge-write of settings
-	started time.Time          // when the control server came up; session elapsed
-	cancel  context.CancelFunc // optional: quit action cancels the session ctx
+	server       *http.Server
+	listener     net.Listener
+	allowedHosts map[string]bool // Host header values this server answers to
+	mc           mcControl
+	mu           sync.Mutex         // serializes the read-merge-write of settings
+	started      time.Time          // when the control server came up; session elapsed
+	cancel       context.CancelFunc // optional: quit action cancels the session ctx
 }
 
 // SetCancel wires the session cancel function so the "quit" action can stop
@@ -58,11 +62,26 @@ func (c *controlServer) SetCancel(cancel context.CancelFunc) {
 	c.cancel = cancel
 }
 
-// newControlServer builds the local http control plane bound to addr. It does
-// not bind until serve is called; addr must be a loopback address (enforced
-// by the caller in main.go run).
-func newControlServer(addr string, mc mcControl) (*controlServer, error) {
-	c := &controlServer{mc: mc, started: time.Now()}
+// newControlServer builds the local http control plane on a listener the
+// caller has already bound. It refuses a listener that is not on a loopback
+// address. Requests are answered only when their Host header names the
+// address the listener is bound to (or localhost on that port), so a page that
+// rebinds its own hostname to 127.0.0.1 cannot read the control plane.
+func newControlServer(ln net.Listener, mc mcControl) (*controlServer, error) {
+	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok || !tcpAddr.IP.IsLoopback() {
+		return nil, fmt.Errorf("control listener %s is not a loopback address", ln.Addr())
+	}
+	port := strconv.Itoa(tcpAddr.Port)
+	c := &controlServer{
+		listener: ln,
+		allowedHosts: map[string]bool{
+			net.JoinHostPort(tcpAddr.IP.String(), port): true,
+			net.JoinHostPort("localhost", port):         true,
+		},
+		mc:      mc,
+		started: time.Now(),
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", c.handleRoot)
 	mux.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
@@ -75,14 +94,28 @@ func newControlServer(addr string, mc mcControl) (*controlServer, error) {
 	mux.HandleFunc("/exits", c.handleExits)
 	mux.HandleFunc("/stats", c.handleStats)
 	c.server = &http.Server{
-		Addr:              addr,
-		Handler:           mux,
+		Addr:              ln.Addr().String(),
+		Handler:           c.requireAllowedHost(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	return c, nil
+}
+
+// requireAllowedHost answers 403 to any request whose Host header is not one
+// of the control server's own addresses. The Origin check covers writes from a
+// browser, and this check covers reads, which a DNS rebinding page can make
+// with no Origin header at all.
+func (c *controlServer) requireAllowedHost(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !c.allowedHosts[strings.ToLower(r.Host)] {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not allowed"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (c *controlServer) serve(ctx context.Context) {
@@ -92,7 +125,7 @@ func (c *controlServer) serve(ctx context.Context) {
 		defer cancel()
 		c.server.Shutdown(shutdownCtx)
 	}()
-	if err := c.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := c.server.Serve(c.listener); err != nil && err != http.ErrServerClosed {
 		fmt.Printf("control server error: %v\n", err)
 	}
 }

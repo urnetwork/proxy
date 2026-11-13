@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -266,12 +265,7 @@ func (f *fakeMC) PacketStats() *connect.PacketStats {
 
 func TestControlEndpoints(t *testing.T) {
 	mc := &fakeMC{}
-	c, err := newControlServer("127.0.0.1:0", mc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(c.server.Handler)
-	defer srv.Close()
+	_, srv := startTestControl(t, mc)
 
 	// GET /settings returns json with current values
 	resp, err := http.Get(srv.URL + "/settings")
@@ -373,12 +367,7 @@ func TestControlEndpoints(t *testing.T) {
 
 func TestControlServerRejectsBadMethod(t *testing.T) {
 	mc := &fakeMC{}
-	c, err := newControlServer("127.0.0.1:0", mc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(c.server.Handler)
-	defer srv.Close()
+	_, srv := startTestControl(t, mc)
 
 	req, _ := http.NewRequest("DELETE", srv.URL+"/settings", nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -397,12 +386,7 @@ func TestControlServerRejectsBadMethod(t *testing.T) {
 // loopback Origin pass.
 func TestControlRejectsNonLoopbackOrigin(t *testing.T) {
 	mc := &fakeMC{}
-	c, err := newControlServer("127.0.0.1:0", mc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(c.server.Handler)
-	defer srv.Close()
+	_, srv := startTestControl(t, mc)
 
 	// no Origin -> allowed (curl)
 	req, _ := http.NewRequest("PUT", srv.URL+"/settings", strings.NewReader(`{"maxFlowsPerExit": 16}`))
@@ -456,12 +440,7 @@ func TestControlRejectsNonLoopbackOrigin(t *testing.T) {
 // PUTs that set different fields concurrently must both survive.
 func TestControlConcurrentSettingsPut(t *testing.T) {
 	mc := &fakeMC{}
-	c, err := newControlServer("127.0.0.1:0", mc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(c.server.Handler)
-	defer srv.Close()
+	_, srv := startTestControl(t, mc)
 
 	done := make(chan struct{}, 2)
 	go func() {
