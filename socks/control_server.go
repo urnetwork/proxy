@@ -29,7 +29,7 @@ var urLogoSvg []byte
 // dev knobs can be changed mid-run without a reconnect, mirroring the android
 // developer screen. Bind it to loopback -- it is an unauthenticated control
 // plane. Even on loopback, mutating requests are rejected unless they carry
-// no Origin header or a loopback Origin, so a web page open in a browser
+// no Origin header or this server's own origin, so a web page open in a browser
 // cannot drive the control plane (same class as the webpack-dev-server
 // drive-by-localhost CVEs).
 type controlServer struct {
@@ -105,6 +105,9 @@ func (self *controlServer) requireAllowedHost(next http.Handler) http.Handler {
 }
 
 func (self *controlServer) serve(ctx context.Context) {
+	// The waiter below must end when Serve returns, whatever the reason.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -134,25 +137,22 @@ func (self *controlServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 	w.Write(controlPanelHtml)
 }
 
-// loopbackOrigin reports whether the request's Origin header (if any) is a
-// loopback origin. A request with no Origin header (curl, local scripts) is
-// allowed; a browser cross-origin request always sends Origin, and only
-// loopback origins may drive the unauthenticated control plane.
-func loopbackOrigin(r *http.Request) bool {
+// sameOrigin reports whether the request's Origin header, if there is one, is
+// this control server's own origin. A request with no Origin header (curl,
+// local scripts) is allowed. A browser sends Origin on every cross-origin
+// write, and only a page served by this server (the panel) has the server's own
+// scheme, host and port. A page on another local port, or on localhost with the
+// wrong port, is refused even though its host is loopback.
+func (self *controlServer) sameOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return true
 	}
 	u, err := url.Parse(origin)
-	if err != nil || u.Hostname() == "" {
+	if err != nil || u.Scheme != "http" {
 		return false
 	}
-	host := u.Hostname()
-	ip := net.ParseIP(host)
-	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		return false
-	}
-	return true
+	return self.allowedHosts[strings.ToLower(u.Host)]
 }
 
 // GET /settings -> current ReliabilitySettings as ms/json
@@ -165,8 +165,8 @@ func (self *controlServer) handleSettings(w http.ResponseWriter, r *http.Request
 		self.stateLock.Unlock()
 		writeJson(w, http.StatusOK, settingsToFile(s))
 	case http.MethodPut, http.MethodPost:
-		if !loopbackOrigin(r) {
-			writeJson(w, http.StatusForbidden, map[string]string{"error": "non-loopback origin rejected"})
+		if !self.sameOrigin(r) {
+			writeJson(w, http.StatusForbidden, map[string]string{"error": "cross-origin request rejected"})
 			return
 		}
 		var f reliabilityFile
@@ -193,8 +193,8 @@ func (self *controlServer) handleActions(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if !loopbackOrigin(r) {
-		writeJson(w, http.StatusForbidden, map[string]string{"error": "non-loopback origin rejected"})
+	if !self.sameOrigin(r) {
+		writeJson(w, http.StatusForbidden, map[string]string{"error": "cross-origin request rejected"})
 		return
 	}
 	var req struct {

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -354,8 +356,8 @@ func TestControlServerRejectsBadMethod(t *testing.T) {
 
 // TestControlRejectsNonLoopbackOrigin pins the CSRF guard: a browser
 // cross-origin request (which always sends Origin) must be refused on the
-// mutating endpoints, while requests without Origin (curl) and with a
-// loopback Origin pass.
+// mutating endpoints, while requests without Origin (curl) and with the
+// control server's own origin pass.
 func TestControlRejectsNonLoopbackOrigin(t *testing.T) {
 	mc := &fakeMc{}
 	_, srv := startTestControl(t, mc)
@@ -371,15 +373,15 @@ func TestControlRejectsNonLoopbackOrigin(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// loopback Origin -> allowed
+	// the server's own origin (the panel) -> allowed
 	req, _ = http.NewRequest("POST", srv.URL+"/actions", strings.NewReader(`{"action":"shuffle"}`))
-	req.Header.Set("Origin", "http://127.0.0.1:8080")
+	req.Header.Set("Origin", srv.URL)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("POST with loopback Origin = %d, want 200", resp.StatusCode)
+		t.Errorf("POST with its own Origin = %d, want 200", resp.StatusCode)
 	}
 	resp.Body.Close()
 
@@ -469,5 +471,102 @@ func TestControlPutSettingsKeepsUnnamedFields(t *testing.T) {
 	want.MaxFlowsPerExit = 64
 	if *mc.settings != want {
 		t.Errorf("settings after PUT = %+v, want %+v", *mc.settings, want)
+	}
+}
+
+// TestControlRefusesOtherLocalOrigins covers a page served from another
+// local port or from localhost. Its Origin is loopback, but it is not the
+// control server's origin, so a form post from it must not run an action.
+// A text/plain body avoids a CORS preflight and still decodes as JSON.
+func TestControlRefusesOtherLocalOrigins(t *testing.T) {
+	mc := &fakeMc{}
+	_, srv := startTestControl(t, mc)
+	port := strconv.Itoa(srv.Listener.Addr().(*net.TCPAddr).Port)
+
+	for _, origin := range []string{
+		"http://localhost:12345",
+		"http://127.0.0.1:12345",
+		"http://localhost",
+		"http://[::1]:" + port,
+		"https://127.0.0.1:" + port,
+		"null",
+	} {
+		req, _ := http.NewRequest("POST", srv.URL+"/actions", strings.NewReader(`{"action":"shuffle"}`))
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Content-Type", "text/plain")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("POST with Origin %q = %d, want 403", origin, resp.StatusCode)
+		}
+	}
+	if mc.shuffled {
+		t.Error("shuffle ran for a foreign local origin")
+	}
+
+	// the same page on the server's own address and port is the panel
+	for _, origin := range []string{srv.URL, "http://localhost:" + port} {
+		req, _ := http.NewRequest("POST", srv.URL+"/actions", strings.NewReader(`{"action":"shuffle"}`))
+		req.Header.Set("Origin", origin)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("POST with Origin %q = %d, want 200", origin, resp.StatusCode)
+		}
+	}
+}
+
+// TestControlServeEndsItsWaiterWhenServeFails covers Serve returning while the
+// session context is still live: the goroutine that waits for the context must
+// not outlive serve.
+func TestControlServeEndsItsWaiterWhenServeFails(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := newControlServer(ln, &fakeMc{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		c.serve(ctx)
+		close(done)
+	}()
+	// a completed request shows Serve is accepting
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + ln.Addr().String() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// Serve fails because its listener is closed, with ctx still live
+	ln.Close()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not return after its listener closed")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		if !strings.Contains(string(buf[:n]), "(*controlServer).serve.func1") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the serve waiter goroutine is still running with ctx live")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
