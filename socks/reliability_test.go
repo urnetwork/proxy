@@ -65,7 +65,7 @@ func TestParseReliabilityFileMissing(t *testing.T) {
 	}
 }
 
-func TestFileToSettingsExplicitZeroApplied(t *testing.T) {
+func TestApplyFileToSettingsExplicitZeroApplied(t *testing.T) {
 	// an explicit 0 in the file must be applied (0 = off / pre-fix behavior),
 	// distinct from nil (untouched)
 	f := &reliabilityFile{
@@ -74,10 +74,14 @@ func TestFileToSettingsExplicitZeroApplied(t *testing.T) {
 		BusyProbe:                 boolPtr(false),
 		BlackholeReceiveTimeoutMs: int64Ptr(0),
 	}
-	s, err := fileToSettings(f)
-	if err != nil {
-		t.Fatal(err)
+	s := &connect.ReliabilitySettings{
+		MaxFlowsPerExit:         32,
+		SendStallTimeout:        3 * time.Second,
+		BusyProbe:               true,
+		BlackholeReceiveTimeout: 20 * time.Second,
+		UdpTeardownSignal:       true,
 	}
+	applyFileToSettings(s, f)
 	if s.MaxFlowsPerExit != 0 {
 		t.Errorf("MaxFlowsPerExit = %d, want 0 (explicit zero applied)", s.MaxFlowsPerExit)
 	}
@@ -90,25 +94,19 @@ func TestFileToSettingsExplicitZeroApplied(t *testing.T) {
 	if s.BlackholeReceiveTimeout != 0 {
 		t.Errorf("BlackholeReceiveTimeout = %v, want 0", s.BlackholeReceiveTimeout)
 	}
+	if !s.UdpTeardownSignal {
+		t.Error("UdpTeardownSignal = false, want true (nil field untouched)")
+	}
 }
 
-func TestApplyFileOverPreservesBase(t *testing.T) {
+func TestMergeReliabilitySettingsPreservesBase(t *testing.T) {
 	base := &connect.ReliabilitySettings{
 		UdpTeardownSignal:       true,
 		SendStallTimeout:        3000 * time.Millisecond,
 		MaxFlowsPerExit:         16,
 		BlackholeReceiveTimeout: 20 * time.Second,
 	}
-	overlay := &reliabilityFile{MaxFlowsPerExit: intPtr(64)}
-
-	merged := settingsToFile(base)
-	if err := applyFileOver(merged, overlay); err != nil {
-		t.Fatal(err)
-	}
-	s, err := fileToSettings(merged)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := mergeReliabilitySettings(base, reliabilityFile{MaxFlowsPerExit: intPtr(64)})
 	if s.MaxFlowsPerExit != 64 {
 		t.Errorf("MaxFlowsPerExit = %d, want 64", s.MaxFlowsPerExit)
 	}
@@ -161,10 +159,8 @@ func TestSettingsToFileRoundTrip(t *testing.T) {
 		HeartbeatInterval:                  60 * time.Second,
 	}
 
-	back, err := fileToSettings(settingsToFile(s))
-	if err != nil {
-		t.Fatal(err)
-	}
+	back := &connect.ReliabilitySettings{}
+	applyFileToSettings(back, settingsToFile(s))
 	// spot-check the ones with interesting conversions
 	if back.MaxFlowsPerExit != 16 {
 		t.Errorf("MaxFlowsPerExit = %d, want 16", back.MaxFlowsPerExit)

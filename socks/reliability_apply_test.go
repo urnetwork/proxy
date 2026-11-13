@@ -3,13 +3,15 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/urnetwork/connect"
 )
 
-// TestApplyFileOverAllFields walks every field branch of applyFileOver by
-// overlaying a file with every field set onto an empty base, then verifying
-// each landed. This is the branch-coverage companion to the partial-merge
-// semantics test.
-func TestApplyFileOverAllFields(t *testing.T) {
+// TestApplyFileToSettingsAllFields walks every field branch of
+// applyFileToSettings by applying a file with every field set onto an empty
+// base, then verifying each landed. This is the branch-coverage companion to
+// the partial-merge tests.
+func TestApplyFileToSettingsAllFields(t *testing.T) {
 	overlay := &reliabilityFile{
 		UdpTeardownSignal:                    boolPtr(true),
 		QuicRebindOnExitLoss:                 boolPtr(true),
@@ -47,15 +49,8 @@ func TestApplyFileOverAllFields(t *testing.T) {
 		HeartbeatIntervalMs:                  int64Ptr(60000),
 	}
 
-	dst := &reliabilityFile{}
-	if err := applyFileOver(dst, overlay); err != nil {
-		t.Fatal(err)
-	}
-
-	s, err := fileToSettings(dst)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := &connect.ReliabilitySettings{}
+	applyFileToSettings(s, overlay)
 
 	checks := []struct {
 		name string
@@ -101,26 +96,5 @@ func TestApplyFileOverAllFields(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
 		}
-	}
-}
-
-// TestLoadReliabilitySettingsFile covers the thin file-loading wrapper and
-// its error paths.
-func TestLoadReliabilitySettingsFile(t *testing.T) {
-	path := writeRelFile(t, `{"maxFlowsPerExit": 32}`)
-	s, err := loadReliabilitySettingsFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.MaxFlowsPerExit != 32 {
-		t.Errorf("MaxFlowsPerExit = %d, want 32", s.MaxFlowsPerExit)
-	}
-
-	if _, err := loadReliabilitySettingsFile("/nonexistent.json"); err == nil {
-		t.Error("expected error for missing file")
-	}
-	bad := writeRelFile(t, `{bad`)
-	if _, err := loadReliabilitySettingsFile(bad); err == nil {
-		t.Error("expected error for invalid json")
 	}
 }

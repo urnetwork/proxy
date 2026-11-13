@@ -158,12 +158,7 @@ func (c *controlServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		// start from current so unset fields are preserved
 		c.mu.Lock()
-		merged, err := mergeReliabilitySettings(c.mc.ReliabilitySettings(), f)
-		if err != nil {
-			c.mu.Unlock()
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
+		merged := mergeReliabilitySettings(c.mc.ReliabilitySettings(), f)
 		c.mc.SetReliabilitySettings(merged)
 		out := settingsToFile(c.mc.ReliabilitySettings())
 		c.mu.Unlock()
@@ -321,17 +316,14 @@ func settingsToFile(s *connect.ReliabilitySettings) *reliabilityFile {
 	}
 }
 
-// mergeReliabilitySettings applies a partial file over the current settings.
-func mergeReliabilitySettings(cur *connect.ReliabilitySettings, f reliabilityFile) (*connect.ReliabilitySettings, error) {
-	if cur == nil {
-		cur = &connect.ReliabilitySettings{}
+// mergeReliabilitySettings returns a copy of cur with the fields f names
+// overwritten. A field f does not name keeps its current value, including the
+// fields the file shape has no entry for.
+func mergeReliabilitySettings(cur *connect.ReliabilitySettings, f reliabilityFile) *connect.ReliabilitySettings {
+	merged := connect.ReliabilitySettings{}
+	if cur != nil {
+		merged = *cur
 	}
-	// reuse the loader by round-tripping through the file it would produce
-	merged := settingsToFile(cur)
-	// overwrite named fields (json decode already validated types)
-	if err := applyFileOver(merged, &f); err != nil {
-		return nil, err
-	}
-	// build back into a struct
-	return fileToSettings(merged)
+	applyFileToSettings(&merged, &f)
+	return &merged
 }

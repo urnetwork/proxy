@@ -262,15 +262,7 @@ Options:
 			if err != nil {
 				return fmt.Errorf("reliability settings: %w", err)
 			}
-			merged := settingsToFile(mc.ReliabilitySettings())
-			if err := applyFileOver(merged, f); err != nil {
-				return fmt.Errorf("reliability settings: %w", err)
-			}
-			settings, err := fileToSettings(merged)
-			if err != nil {
-				return fmt.Errorf("reliability settings: %w", err)
-			}
-			mc.SetReliabilitySettings(settings)
+			mc.SetReliabilitySettings(mergeReliabilitySettings(mc.ReliabilitySettings(), *f))
 			fmt.Printf("reliability settings loaded from %s\n", cfg.reliability)
 		}
 
