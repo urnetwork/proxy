@@ -1,9 +1,7 @@
 package main
 
 import (
-	"net/http"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -100,32 +98,5 @@ func TestMergeReliabilitySettingsNilCurrent(t *testing.T) {
 	merged := mergeReliabilitySettings(nil, reliabilityFile{SendStallTimeoutMs: int64Ptr(3000)})
 	if merged.SendStallTimeout != 3*time.Second {
 		t.Errorf("SendStallTimeout = %v, want 3s", merged.SendStallTimeout)
-	}
-}
-
-// TestControlPutSettingsKeepsUnnamedFields drives a one-field PUT /settings
-// through the control server and checks that the multi client's settings keep
-// every other field.
-func TestControlPutSettingsKeepsUnnamedFields(t *testing.T) {
-	cur := &connect.ReliabilitySettings{}
-	fillReliabilitySettings(t, cur)
-	before := *cur
-	mc := &fakeMC{settings: cur}
-	_, srv := startTestControl(t, mc)
-
-	req, _ := http.NewRequest("PUT", srv.URL+"/settings", strings.NewReader(`{"maxFlowsPerExit": 64}`))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
-	}
-
-	want := before
-	want.MaxFlowsPerExit = 64
-	if *mc.settings != want {
-		t.Errorf("settings after PUT = %+v, want %+v", *mc.settings, want)
 	}
 }

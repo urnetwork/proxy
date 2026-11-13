@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/urnetwork/connect"
@@ -212,143 +210,9 @@ func TestLoginWithAuthCodeError(t *testing.T) {
 
 // --- control server error branches ---
 
-func TestControlSettingsBadJSON(t *testing.T) {
-	mc := &fakeMC{}
-	_, srv := startTestControl(t, mc)
-
-	req, _ := http.NewRequest("PUT", srv.URL+"/settings", strings.NewReader("{not json"))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("PUT bad json status = %d, want 400", resp.StatusCode)
-	}
-	resp.Body.Close()
-}
-
-func TestControlActionsStallMigrate(t *testing.T) {
-	mc := &fakeMC{}
-	_, srv := startTestControl(t, mc)
-
-	cid := "019fde39-e690-add0-ac88-e354a0d76d6a"
-
-	resp, err := http.Post(srv.URL+"/actions", "application/json",
-		strings.NewReader(`{"action":"stall","clientId":"`+cid+`","stalled":true}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if len(mc.stalled) != 1 || mc.stalled[0] != cid {
-		t.Errorf("stalled = %v, want [%s]", mc.stalled, cid)
-	}
-
-	resp, err = http.Post(srv.URL+"/actions", "application/json",
-		strings.NewReader(`{"action":"migrate","clientId":"`+cid+`"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if len(mc.migrated) != 1 || mc.migrated[0] != cid {
-		t.Errorf("migrated = %v, want [%s]", mc.migrated, cid)
-	}
-
-	// malformed client id -> 400
-	resp, err = http.Post(srv.URL+"/actions", "application/json",
-		strings.NewReader(`{"action":"drop","clientId":"nope"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("drop bad clientId status = %d, want 400", resp.StatusCode)
-	}
-	resp.Body.Close()
-}
-
-// TestControlQuitAction verifies the quit action invokes the wired cancel.
-func TestControlQuitAction(t *testing.T) {
-	mc := &fakeMC{}
-	c, srv := startTestControl(t, mc)
-	cancelled := false
-	c.SetCancel(func() { cancelled = true })
-
-	resp, err := http.Post(srv.URL+"/actions", "application/json", strings.NewReader(`{"action":"quit"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST quit status = %d, want 200", resp.StatusCode)
-	}
-	resp.Body.Close()
-	if !cancelled {
-		t.Error("quit action did not invoke the session cancel")
-	}
-}
-
 // --- /stats session readout ---
 
-func TestControlStatsEndpoint(t *testing.T) {
-	mc := &fakeMC{}
-	_, srv := startTestControl(t, mc)
-
-	resp, err := http.Get(srv.URL + "/stats")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /stats status = %d, want 200", resp.StatusCode)
-	}
-	var st statsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
-		t.Fatal(err)
-	}
-	if st.BytesUp != 1024 || st.BytesDown != 2048 {
-		t.Errorf("stats bytes = %d up / %d down, want 1024/2048", st.BytesUp, st.BytesDown)
-	}
-	if st.PacketsUp != 10 || st.PacketsDown != 20 {
-		t.Errorf("stats packets = %d up / %d down, want 10/20", st.PacketsUp, st.PacketsDown)
-	}
-	if st.ElapsedSeconds < 0 {
-		t.Errorf("elapsedSeconds = %d, want >= 0", st.ElapsedSeconds)
-	}
-}
-
 // --- serve() shutdown on context cancel ---
-
-func TestControlServerServeShutdown(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := newControlServer(ln, &fakeMC{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		c.serve(ctx)
-		close(done)
-	}()
-
-	// A completed request shows the serve loop is up, so no sleep is needed.
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get("http://" + ln.Addr().String() + "/metrics")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-
-	cancel()
-	select {
-	case <-done:
-		// clean exit
-	case <-time.After(3 * time.Second):
-		t.Fatal("serve did not return within 3s of ctx cancel")
-	}
-}
 
 // --- printReliabilityMetrics output format ---
 

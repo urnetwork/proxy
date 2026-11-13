@@ -84,8 +84,7 @@ Options:
     --region=<region>              region (env REGION)
     --metrics-every=<ms>           print reliability metrics + exit table every N ms (env METRICS_EVERY, 0 = off)
     --reset-metrics                zero the reliability counters at startup (env RESET_METRICS=1)
-    --reliability=<file>           json file of reliability settings applied at startup (env RELIABILITY)
-    --control=<addr>               local control http server (env CONTROL, e.g. 127.0.0.1:9998, empty = off)
+    --reliability=<file>           json file of reliability settings applied at startup (env RELIABILITY)` + controlUsage + `
     -h --help                      show this help.`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], Version)
@@ -154,7 +153,7 @@ Options:
 	resetMetrics, _ := opts.Bool("--reset-metrics")
 	cfg.resetMetrics = resetMetrics || os.Getenv("RESET_METRICS") == "1"
 	cfg.reliability = pick("--reliability", "RELIABILITY", "")
-	cfg.control = pick("--control", "CONTROL", "")
+	cfg.control = controlFlag(pick)
 
 	if cfg.jwt == "" && cfg.authCode == "" && (cfg.userAuth == "" || cfg.password == "") {
 		fmt.Fprintln(os.Stderr, "provide --jwt, --auth-code, or --user-auth + --password (or set JWT / AUTH_CODE / USER_AUTH + PASSWORD)")
@@ -267,18 +266,9 @@ Options:
 		}
 
 		if cfg.control != "" {
-			ln, err := listenControl(cfg.control)
-			if err != nil {
+			if err := startControl(ctx, stop, cfg.control, mc); err != nil {
 				return err
 			}
-			server, err := newControlServer(ln, mc)
-			if err != nil {
-				ln.Close()
-				return fmt.Errorf("control server: %w", err)
-			}
-			server.SetCancel(stop)
-			go server.serve(ctx)
-			fmt.Printf("control server listening on %s\n", ln.Addr())
 		}
 
 		if cfg.resetMetrics {
@@ -465,42 +455,6 @@ func exitLabelString(s string) string {
 		return s
 	}
 	return s[len(s)-8:]
-}
-
-// controlAddrIsLoopback reports whether addr is a loopback bind address
-// (localhost, 127.0.0.1, or ::1) with a port. The control server is
-// unauthenticated, so anything else must be refused.
-func controlAddrIsLoopback(addr string) (bool, error) {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false, err
-	}
-	ip := net.ParseIP(host)
-	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		return false, nil
-	}
-	return true, nil
-}
-
-// listenControl binds the control address before anything else starts, so a
-// port that is taken stops the proxy with an error. The control server is
-// unauthenticated and can change settings, drop exits and migrate flows, so a
-// non-loopback address is refused before it is bound, and newControlServer
-// checks the bound address again because a name such as localhost can resolve
-// to something else.
-func listenControl(addr string) (net.Listener, error) {
-	ok, err := controlAddrIsLoopback(addr)
-	if err != nil {
-		return nil, fmt.Errorf("control address: %w", err)
-	}
-	if !ok {
-		return nil, fmt.Errorf("control address %q must be loopback; the control server is unauthenticated", addr)
-	}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("control server: %w", err)
-	}
-	return ln, nil
 }
 
 // resolveProviderSpec resolves the requested location to provider specs.

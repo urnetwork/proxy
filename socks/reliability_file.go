@@ -177,3 +177,15 @@ func applyFileToSettings(dst *connect.ReliabilitySettings, f *reliabilityFile) {
 	}
 
 }
+
+// mergeReliabilitySettings returns a copy of cur with the fields f names
+// overwritten. A field f does not name keeps its current value, including the
+// fields the file shape has no entry for.
+func mergeReliabilitySettings(cur *connect.ReliabilitySettings, f reliabilityFile) *connect.ReliabilitySettings {
+	merged := connect.ReliabilitySettings{}
+	if cur != nil {
+		merged = *cur
+	}
+	applyFileToSettings(&merged, &f)
+	return &merged
+}

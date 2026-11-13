@@ -1,3 +1,5 @@
+//go:build dev
+
 package main
 
 import (
@@ -22,22 +24,6 @@ var controlPanelHTML []byte
 
 //go:embed ur_logo.svg
 var urLogoSVG []byte
-
-// mcControl is the slice of the multi client the control plane uses. The real
-// *connect.RemoteUserNatMultiClient satisfies it; tests substitute a fake.
-type mcControl interface {
-	ReliabilitySettings() *connect.ReliabilitySettings
-	SetReliabilitySettings(settings *connect.ReliabilitySettings)
-	ReliabilityMetrics() *connect.ReliabilityMetricsSnapshot
-	ResetReliabilityMetrics()
-	Shuffle()
-	ProbeAllExits() int
-	Exits() []*connect.ExitInfo
-	DropExit(clientId connect.Id) bool
-	StallExit(clientId connect.Id, stalled bool) bool
-	MigrateExit(clientId connect.Id) int
-	PacketStats() *connect.PacketStats
-}
 
 // controlServer exposes the live connection to a local http client so the
 // dev knobs can be changed mid-run without a reconnect, mirroring the android
@@ -349,14 +335,65 @@ func settingsToFile(s *connect.ReliabilitySettings) *reliabilityFile {
 	}
 }
 
-// mergeReliabilitySettings returns a copy of cur with the fields f names
-// overwritten. A field f does not name keeps its current value, including the
-// fields the file shape has no entry for.
-func mergeReliabilitySettings(cur *connect.ReliabilitySettings, f reliabilityFile) *connect.ReliabilitySettings {
-	merged := connect.ReliabilitySettings{}
-	if cur != nil {
-		merged = *cur
+// controlAddrIsLoopback reports whether addr is a loopback bind address
+// (localhost, 127.0.0.1, or ::1) with a port. The control server is
+// unauthenticated, so anything else must be refused.
+func controlAddrIsLoopback(addr string) (bool, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false, err
 	}
-	applyFileToSettings(&merged, &f)
-	return &merged
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return false, nil
+	}
+	return true, nil
+}
+
+// listenControl binds the control address before anything else starts, so a
+// port that is taken stops the proxy with an error. The control server is
+// unauthenticated and can change settings, drop exits and migrate flows, so a
+// non-loopback address is refused before it is bound, and newControlServer
+// checks the bound address again because a name such as localhost can resolve
+// to something else.
+func listenControl(addr string) (net.Listener, error) {
+	ok, err := controlAddrIsLoopback(addr)
+	if err != nil {
+		return nil, fmt.Errorf("control address: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("control address %q must be loopback; the control server is unauthenticated", addr)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("control server: %w", err)
+	}
+	return ln, nil
+}
+
+// controlUsage is the --control line of the usage text. Only a dev build has it.
+const controlUsage = `
+    --control=<addr>               local control http server, dev builds only (env CONTROL, e.g. 127.0.0.1:9998, empty = off)`
+
+// controlFlag reads the control address from --control or CONTROL.
+func controlFlag(pick func(optName string, envName string, def string) string) string {
+	return pick("--control", "CONTROL", "")
+}
+
+// startControl binds the control address, then serves the control plane until
+// ctx ends. A failed bind or a non-loopback address is returned.
+func startControl(ctx context.Context, stop context.CancelFunc, addr string, mc mcControl) error {
+	ln, err := listenControl(addr)
+	if err != nil {
+		return err
+	}
+	server, err := newControlServer(ln, mc)
+	if err != nil {
+		ln.Close()
+		return fmt.Errorf("control server: %w", err)
+	}
+	server.SetCancel(stop)
+	go server.serve(ctx)
+	fmt.Printf("control server listening on %s\n", ln.Addr())
+	return nil
 }
