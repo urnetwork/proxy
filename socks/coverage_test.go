@@ -35,12 +35,16 @@ func TestFmtDurationMillis(t *testing.T) {
 	}
 }
 
+// syntheticClientId is visibly not a live id. Use it where a test needs a
+// fixed id, and connect.NewId() where the value does not matter.
+const syntheticClientId = "00000000-0000-4000-8000-000000000001"
+
 func TestExitLabel(t *testing.T) {
-	id, err := connect.ParseId("019fde39-e690-add0-ac88-e354a0d76d6a")
+	id, err := connect.ParseId(syntheticClientId)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := exitLabel(id); got != "a0d76d6a" {
+	if got := exitLabel(id); got != "00000001" {
 		t.Errorf("exitLabel = %q, want last-8 chars", got)
 	}
 	// a short id must be returned whole (the len<=8 branch). connect.ParseId
@@ -67,7 +71,7 @@ func TestFilterMapSlice(t *testing.T) {
 
 // parseByJwtClientId extracts the client_id claim from an (unverified) JWT.
 func TestParseByJwtClientId(t *testing.T) {
-	cid := "019fde39-e690-add0-ac88-e354a0d76d6a"
+	cid := connect.NewId().String()
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"client_id": cid,
 	})
@@ -131,9 +135,9 @@ func TestGetProviderSpecByCityCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestGetProviderSpecByProviderID(t *testing.T) {
+func TestGetProviderSpecByProviderId(t *testing.T) {
 	locs := loadSampleLocations(t)
-	cid := "019fde39-e690-add0-ac88-e354a0d76d6a"
+	cid := connect.NewId().String()
 	specs, err := getProviderSpec(locs, "", "", "", cid)
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +147,7 @@ func TestGetProviderSpecByProviderID(t *testing.T) {
 	}
 }
 
-func TestGetProviderSpecBadProviderID(t *testing.T) {
+func TestGetProviderSpecBadProviderId(t *testing.T) {
 	locs := loadSampleLocations(t)
 	if _, err := getProviderSpec(locs, "", "", "", "not-an-id"); err == nil {
 		t.Fatal("expected error for malformed provider id")
@@ -160,7 +164,7 @@ func TestGetProviderSpecNoMatch(t *testing.T) {
 // --- loginWithAuthCode against a stubbed /auth/code-login ---
 
 func TestLoginWithAuthCodeSuccess(t *testing.T) {
-	expectedJwt := "eyJhbGciOiJIUzI1NiJ9.eyJjbGllbnRfaWQiOiIwMTlmZGUzOS1lNjkwLWFkZDAtYWM4OC1lMzU0YTBkNzZkNmEifQ.fake"
+	expectedJwt := "synthetic-header.synthetic-payload.synthetic-signature"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/hello" {
 			w.WriteHeader(http.StatusOK)
@@ -217,7 +221,7 @@ func TestLoginWithAuthCodeError(t *testing.T) {
 // --- printReliabilityMetrics output format ---
 
 func TestPrintReliabilityMetrics(t *testing.T) {
-	mc := &fakeMC{
+	mc := &fakeMc{
 		settings: &connect.ReliabilitySettings{},
 		metrics: &connect.ReliabilityMetricsSnapshot{
 			FlowsOpened:               12,
@@ -237,7 +241,7 @@ func TestPrintReliabilityMetrics(t *testing.T) {
 			VerdictsHeldTransportDown: 1,
 		},
 		exits: []*connect.ExitInfo{
-			{ClientId: mustParseId(t, "019fde39-e690-add0-ac88-e354a0d76d6a"), FlowCount: 5, Tier: 1, EffectiveTier: 1, Proven: true},
+			{ClientId: mustParseId(t, syntheticClientId), FlowCount: 5, Tier: 1, EffectiveTier: 1, Proven: true},
 		},
 	}
 
@@ -276,4 +280,18 @@ func mustParseId(t *testing.T, s string) connect.Id {
 		t.Fatal(err)
 	}
 	return id
+}
+
+func TestParseMetricsEvery(t *testing.T) {
+	for value, want := range map[string]int{"0": 0, "1": 1, "5000": 5000} {
+		got, err := parseMetricsEvery(value)
+		if err != nil || got != want {
+			t.Errorf("parseMetricsEvery(%q) = %d, %v, want %d", value, got, err, want)
+		}
+	}
+	for _, value := range []string{"-1", "abc", "1.5", " 5"} {
+		if got, err := parseMetricsEvery(value); err == nil {
+			t.Errorf("parseMetricsEvery(%q) = %d, want an error", value, got)
+		}
+	}
 }

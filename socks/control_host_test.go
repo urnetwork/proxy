@@ -51,7 +51,7 @@ func getWithHost(t *testing.T, url string, host string) int {
 // TestControlRefusesForeignHost covers the DNS rebinding read: a page that
 // rebinds its own name to 127.0.0.1 sends that name as Host and no Origin.
 func TestControlRefusesForeignHost(t *testing.T) {
-	_, srv := startTestControl(t, &fakeMC{})
+	_, srv := startTestControl(t, &fakeMc{})
 	port := strconv.Itoa(srv.Listener.Addr().(*net.TCPAddr).Port)
 
 	for _, path := range []string{"/", "/settings", "/metrics", "/exits", "/stats"} {
@@ -69,7 +69,7 @@ func TestControlRefusesForeignHost(t *testing.T) {
 }
 
 func TestControlAnswersItsOwnHost(t *testing.T) {
-	_, srv := startTestControl(t, &fakeMC{})
+	_, srv := startTestControl(t, &fakeMc{})
 	port := strconv.Itoa(srv.Listener.Addr().(*net.TCPAddr).Port)
 
 	for _, host := range []string{"", "localhost:" + port, "LOCALHOST:" + port} {
@@ -95,7 +95,7 @@ func TestNewControlServerRefusesNonLoopbackListener(t *testing.T) {
 		t.Skipf("cannot bind a wildcard address here: %v", err)
 	}
 	defer ln.Close()
-	if _, err := newControlServer(ln, &fakeMC{}); err == nil {
+	if _, err := newControlServer(ln, &fakeMc{}); err == nil {
 		t.Error("newControlServer accepted a wildcard listener, want an error")
 	}
 }

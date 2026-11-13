@@ -121,17 +121,14 @@ Options:
 	cfg.socksUser = pick("--socks-user", "SOCKS_USER", "")
 	cfg.socksPass = pick("--socks-password", "SOCKS_PASSWORD", "")
 
-	if v := optStr("--metrics-every"); v != "" {
-		ms, err := strconv.Atoi(v)
-		if err != nil || ms <= 0 {
-			fmt.Fprintln(os.Stderr, "--metrics-every must be a positive millisecond value")
-			os.Exit(1)
-		}
-		cfg.metricsEveryMs = ms
-	} else if v := os.Getenv("METRICS_EVERY"); v != "" {
-		ms, err := strconv.Atoi(v)
-		if err != nil || ms <= 0 {
-			fmt.Fprintln(os.Stderr, "--metrics-every must be a positive millisecond value")
+	metricsEvery := optStr("--metrics-every")
+	if metricsEvery == "" {
+		metricsEvery = os.Getenv("METRICS_EVERY")
+	}
+	if metricsEvery != "" {
+		ms, err := parseMetricsEvery(metricsEvery)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		cfg.metricsEveryMs = ms
@@ -340,6 +337,16 @@ func isLoopbackListenAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// parseMetricsEvery reads a --metrics-every value in milliseconds. Zero means
+// the printer is off, as the usage text says.
+func parseMetricsEvery(value string) (int, error) {
+	ms, err := strconv.Atoi(value)
+	if err != nil || ms < 0 {
+		return 0, errors.New("--metrics-every must be 0 (off) or a positive millisecond value")
+	}
+	return ms, nil
 }
 
 // checkListenAuth refuses to expose an unauthenticated socks5 port to the

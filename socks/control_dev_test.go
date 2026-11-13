@@ -14,8 +14,8 @@ import (
 	"github.com/urnetwork/connect"
 )
 
-func TestControlSettingsBadJSON(t *testing.T) {
-	mc := &fakeMC{}
+func TestControlSettingsBadJson(t *testing.T) {
+	mc := &fakeMc{}
 	_, srv := startTestControl(t, mc)
 
 	req, _ := http.NewRequest("PUT", srv.URL+"/settings", strings.NewReader("{not json"))
@@ -30,10 +30,10 @@ func TestControlSettingsBadJSON(t *testing.T) {
 }
 
 func TestControlActionsStallMigrate(t *testing.T) {
-	mc := &fakeMC{}
+	mc := &fakeMc{}
 	_, srv := startTestControl(t, mc)
 
-	cid := "019fde39-e690-add0-ac88-e354a0d76d6a"
+	cid := connect.NewId().String()
 
 	resp, err := http.Post(srv.URL+"/actions", "application/json",
 		strings.NewReader(`{"action":"stall","clientId":"`+cid+`","stalled":true}`))
@@ -69,7 +69,7 @@ func TestControlActionsStallMigrate(t *testing.T) {
 
 // TestControlQuitAction verifies the quit action invokes the wired cancel.
 func TestControlQuitAction(t *testing.T) {
-	mc := &fakeMC{}
+	mc := &fakeMc{}
 	c, srv := startTestControl(t, mc)
 	cancelled := false
 	c.SetCancel(func() { cancelled = true })
@@ -88,7 +88,7 @@ func TestControlQuitAction(t *testing.T) {
 }
 
 func TestControlStatsEndpoint(t *testing.T) {
-	mc := &fakeMC{}
+	mc := &fakeMc{}
 	_, srv := startTestControl(t, mc)
 
 	resp, err := http.Get(srv.URL + "/stats")
@@ -119,7 +119,7 @@ func TestControlServerServeShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := newControlServer(ln, &fakeMC{})
+	c, err := newControlServer(ln, &fakeMc{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestControlAddrLoopbackGuard(t *testing.T) {
 }
 
 func TestControlEndpoints(t *testing.T) {
-	mc := &fakeMC{}
+	mc := &fakeMc{}
 	_, srv := startTestControl(t, mc)
 
 	// GET /settings returns json with current values
@@ -293,7 +293,7 @@ func TestControlEndpoints(t *testing.T) {
 	}
 
 	// POST /actions drop with a valid client id
-	cid := "019fde39-e690-add0-ac88-e354a0d76d6a"
+	cid := connect.NewId().String()
 	resp, _ = http.Post(srv.URL+"/actions", "application/json", strings.NewReader(`{"action":"drop","clientId":"`+cid+`"}`))
 	resp.Body.Close()
 	if len(mc.dropped) != 1 || mc.dropped[0] != cid {
@@ -338,7 +338,7 @@ func TestControlEndpoints(t *testing.T) {
 }
 
 func TestControlServerRejectsBadMethod(t *testing.T) {
-	mc := &fakeMC{}
+	mc := &fakeMc{}
 	_, srv := startTestControl(t, mc)
 
 	req, _ := http.NewRequest("DELETE", srv.URL+"/settings", nil)
@@ -357,7 +357,7 @@ func TestControlServerRejectsBadMethod(t *testing.T) {
 // mutating endpoints, while requests without Origin (curl) and with a
 // loopback Origin pass.
 func TestControlRejectsNonLoopbackOrigin(t *testing.T) {
-	mc := &fakeMC{}
+	mc := &fakeMc{}
 	_, srv := startTestControl(t, mc)
 
 	// no Origin -> allowed (curl)
@@ -388,7 +388,7 @@ func TestControlRejectsNonLoopbackOrigin(t *testing.T) {
 		method, path, body string
 	}{
 		{"PUT", "/settings", `{"maxFlowsPerExit": 32}`},
-		{"POST", "/actions", `{"action":"drop","clientId":"019fde39-e690-add0-ac88-e354a0d76d6a"}`},
+		{"POST", "/actions", `{"action":"drop","clientId":"` + syntheticClientId + `"}`},
 	} {
 		req, _ := http.NewRequest(tc.method, srv.URL+tc.path, strings.NewReader(tc.body))
 		req.Header.Set("Origin", "https://evil.example")
@@ -411,7 +411,7 @@ func TestControlRejectsNonLoopbackOrigin(t *testing.T) {
 // TestControlConcurrentSettingsPut exercises the lost-update race fix: two
 // PUTs that set different fields concurrently must both survive.
 func TestControlConcurrentSettingsPut(t *testing.T) {
-	mc := &fakeMC{}
+	mc := &fakeMc{}
 	_, srv := startTestControl(t, mc)
 
 	done := make(chan struct{}, 2)
@@ -452,7 +452,7 @@ func TestControlPutSettingsKeepsUnnamedFields(t *testing.T) {
 	cur := &connect.ReliabilitySettings{}
 	fillReliabilitySettings(t, cur)
 	before := *cur
-	mc := &fakeMC{settings: cur}
+	mc := &fakeMc{settings: cur}
 	_, srv := startTestControl(t, mc)
 
 	req, _ := http.NewRequest("PUT", srv.URL+"/settings", strings.NewReader(`{"maxFlowsPerExit": 64}`))

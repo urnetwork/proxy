@@ -48,7 +48,7 @@ func TestParseReliabilityFilePartial(t *testing.T) {
 	}
 }
 
-func TestParseReliabilityFileBadJSON(t *testing.T) {
+func TestParseReliabilityFileBadJson(t *testing.T) {
 	path := writeRelFile(t, `{not json`)
 	if _, err := parseReliabilityFile(path); err == nil {
 		t.Fatal("expected error for invalid json")
@@ -122,8 +122,8 @@ func TestMergeReliabilitySettingsPreservesBase(t *testing.T) {
 // --- control server endpoints (with a real multi client is impossible here,
 // so use the real server with a stub mc via a minimal fake) ---
 
-// fakeMC implements just enough of the mc surface for the control handlers.
-type fakeMC struct {
+// fakeMc implements just enough of the mc surface for the control handlers.
+type fakeMc struct {
 	settings *connect.ReliabilitySettings
 	metrics  *connect.ReliabilityMetricsSnapshot
 	exits    []*connect.ExitInfo
@@ -135,36 +135,36 @@ type fakeMC struct {
 	resets   int
 }
 
-func (f *fakeMC) ReliabilitySettings() *connect.ReliabilitySettings {
-	if f.settings == nil {
+func (self *fakeMc) ReliabilitySettings() *connect.ReliabilitySettings {
+	if self.settings == nil {
 		return &connect.ReliabilitySettings{}
 	}
-	return f.settings
+	return self.settings
 }
-func (f *fakeMC) SetReliabilitySettings(s *connect.ReliabilitySettings) { f.settings = s }
-func (f *fakeMC) ReliabilityMetrics() *connect.ReliabilityMetricsSnapshot {
-	if f.metrics == nil {
+func (self *fakeMc) SetReliabilitySettings(s *connect.ReliabilitySettings) { self.settings = s }
+func (self *fakeMc) ReliabilityMetrics() *connect.ReliabilityMetricsSnapshot {
+	if self.metrics == nil {
 		return &connect.ReliabilityMetricsSnapshot{}
 	}
-	return f.metrics
+	return self.metrics
 }
-func (f *fakeMC) ResetReliabilityMetrics()   { f.resets++ }
-func (f *fakeMC) Shuffle()                   { f.shuffled = true }
-func (f *fakeMC) ProbeAllExits() int         { f.probed++; return 3 }
-func (f *fakeMC) Exits() []*connect.ExitInfo { return f.exits }
-func (f *fakeMC) DropExit(id connect.Id) bool {
-	f.dropped = append(f.dropped, id.String())
+func (self *fakeMc) ResetReliabilityMetrics()   { self.resets++ }
+func (self *fakeMc) Shuffle()                   { self.shuffled = true }
+func (self *fakeMc) ProbeAllExits() int         { self.probed++; return 3 }
+func (self *fakeMc) Exits() []*connect.ExitInfo { return self.exits }
+func (self *fakeMc) DropExit(id connect.Id) bool {
+	self.dropped = append(self.dropped, id.String())
 	return true
 }
-func (f *fakeMC) StallExit(id connect.Id, stalled bool) bool {
-	f.stalled = append(f.stalled, id.String())
+func (self *fakeMc) StallExit(id connect.Id, stalled bool) bool {
+	self.stalled = append(self.stalled, id.String())
 	return true
 }
-func (f *fakeMC) MigrateExit(id connect.Id) int {
-	f.migrated = append(f.migrated, id.String())
+func (self *fakeMc) MigrateExit(id connect.Id) int {
+	self.migrated = append(self.migrated, id.String())
 	return 5
 }
-func (f *fakeMC) PacketStats() *connect.PacketStats {
+func (self *fakeMc) PacketStats() *connect.PacketStats {
 	return &connect.PacketStats{
 		RemoteEgressByteCount:    1024,
 		RemoteIngressByteCount:   2048,
