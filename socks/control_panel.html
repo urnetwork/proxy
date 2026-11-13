@@ -7,11 +7,6 @@
 <title>socksproxy dev panel</title>
 <style>
   :root { color-scheme: dark; }
-  /* URnetwork design tokens — extracted from the beta.app.ur.network
-     dashboard: ur-black/ur-white/ur-gray/ur-blue/ur-panel/ur-border/
-     ur-green/ur-coral/ur-pink/ur-yellow-light palette, AbcGravityExtended
-     headings, PpNeueMontreal body, PpNeueBitBold buttons, 8px radii,
-     flat 4px hard shadow */
   body {
     font-family: PpNeueMontrealRegular, system-ui, -apple-system, sans-serif;
     background: #101010; /* ur-black */
@@ -56,7 +51,7 @@
   .toggle { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid #212121; }
   .toggle .label { font-size: 13px; color: #F8F8F8; }
   .toggle .detail { font-size: 11px; color: #909090; }
-  .switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; } /* matches dashboard switch 44x24 */
+  .switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; }
   .switch input { opacity: 0; width: 0; height: 0; }
   .slider { position: absolute; inset: 0; background: #282828; border-radius: 9999px; transition: .15s; cursor: pointer; }
   .switch input:focus-visible + .slider { outline: 2px solid #D6E6F4; outline-offset: 2px; }

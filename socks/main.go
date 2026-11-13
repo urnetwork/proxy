@@ -43,7 +43,6 @@ func initGlog() {
 func main() {
 	cfg := struct {
 		addr           string
-		network        string
 		apiURL         string
 		platformURL    string
 		userAuth       string
@@ -71,12 +70,11 @@ Options:
                                    a non-loopback address requires --socks-user and --socks-password.
     --socks-user=<socks-user>      socks5 username clients must send (env SOCKS_USER)
     --socks-password=<socks-pass>  socks5 password clients must send (env SOCKS_PASSWORD)
-    --network=<network>            preset endpoints: main or beta (env NETWORK, default main)
-    --api-url=<api-url>            api url (env API_URL, default from --network)
-    --platform-url=<platform-url>  platform url (env PLATFORM_URL, default from --network)
+    --api-url=<api-url>            api url (env API_URL, default https://api.bringyour.com)
+    --platform-url=<platform-url>  platform url (env PLATFORM_URL, default wss://connect.bringyour.com)
     --user-auth=<user-auth>        user auth (env USER_AUTH)
     --password=<password>          password (env PASSWORD)
-    --auth-code=<auth-code>        auth code login (env AUTH_CODE) - preferred for beta/test networks
+    --auth-code=<auth-code>        auth code login (env AUTH_CODE)
     --jwt=<jwt>                    existing network jwt (env JWT), skips login entirely
     --provider-id=<provider-id>    provider id (env PROVIDER_ID)
     --city=<city>                  city (env CITY)
@@ -110,20 +108,8 @@ Options:
 		return def
 	}
 	cfg.addr = pick("--addr", "ADDR", "127.0.0.1:9999")
-	cfg.network = pick("--network", "NETWORK", "main")
-	switch cfg.network {
-	case "main":
-		cfg.apiURL = pick("--api-url", "API_URL", "https://api.bringyour.com")
-		cfg.platformURL = pick("--platform-url", "PLATFORM_URL", "wss://connect.bringyour.com")
-	case "beta":
-		cfg.apiURL = pick("--api-url", "API_URL", "https://api.beta-test.net")
-		cfg.platformURL = pick("--platform-url", "PLATFORM_URL", "wss://connect.beta-test.net")
-	default:
-		fmt.Fprintf(os.Stderr, "unknown --network %q: expected main or beta\n", cfg.network)
-		os.Exit(1)
-	}
-	// explicit --api-url / --platform-url still override the preset, and the
-	// env vars follow -- pick() above already gave flags priority over env
+	cfg.apiURL = pick("--api-url", "API_URL", "https://api.bringyour.com")
+	cfg.platformURL = pick("--platform-url", "PLATFORM_URL", "wss://connect.bringyour.com")
 	cfg.userAuth = pick("--user-auth", "USER_AUTH", "")
 	cfg.password = pick("--password", "PASSWORD", "")
 	cfg.authCode = pick("--auth-code", "AUTH_CODE", "")
@@ -698,8 +684,8 @@ func login(ctx context.Context, apiURL, userAuth, password string) (string, erro
 }
 
 // loginWithAuthCode redeems an auth code via POST /auth/code-login and
-// returns the network by_jwt. This is the auth path for beta/test networks
-// that have no password accounts -- the same flow the provider CLI uses.
+// returns the network by_jwt. This is the login for networks that have no
+// password accounts, the same flow the provider CLI uses.
 func loginWithAuthCode(ctx context.Context, apiURL, authCode string) (string, error) {
 	api := connect.NewBringYourApi(
 		ctx,
