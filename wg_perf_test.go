@@ -3,7 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net/netip"
 	"os"
 	"runtime"
@@ -117,22 +117,23 @@ func TestWgProxyClientTrickleRouting(t *testing.T) {
 	var routers sync.WaitGroup
 	for r := 0; r < routerCount; r++ {
 		routers.Add(1)
-		go func(seed int64) {
+		go func(seed uint64) {
 			defer routers.Done()
-			rng := rand.New(rand.NewSource(seed))
+			// one fixed stream per router, so a run is repeatable
+			rng := rand.New(rand.NewPCG(seed, 0))
 			for !stop.Load() {
 				n := int(added.Load())
 				if n == 0 {
 					runtime.Gosched()
 					continue
 				}
-				if route(&specs[rng.Intn(n)]) {
+				if route(&specs[rng.IntN(n)]) {
 					routeOK.Add(1)
 				} else {
 					routeFail.Add(1)
 				}
 			}
-		}(int64(r) + 1)
+		}(uint64(r) + 1)
 	}
 
 	// trickle: add clients in small groups with a short pause, simulating a
