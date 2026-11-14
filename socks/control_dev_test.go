@@ -560,7 +560,7 @@ func TestControlServeEndsItsWaiterWhenServeFails(t *testing.T) {
 
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		buf := make([]byte, 1<<20)
+		buf := make([]byte, 1024*1024)
 		n := runtime.Stack(buf, true)
 		if !strings.Contains(string(buf[:n]), "(*controlServer).serve.func1") {
 			return

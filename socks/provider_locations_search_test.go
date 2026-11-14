@@ -98,7 +98,7 @@ func TestMergeLocationsDeduplicates(t *testing.T) {
 func TestResolveProviderSpecSkipsSearchWithoutCityOrRegion(t *testing.T) {
 	const (
 		usID       = "018bab1d-4ea0-4bd2-d15a-683802e0873e"
-		providerID = "019fde39-e690-add0-ac88-e354a0d76d6a"
+		providerID = "00000000-0000-4000-8000-000000000002"
 	)
 
 	var searchCalls atomic.Int32
