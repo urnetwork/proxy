@@ -24,8 +24,9 @@ Replace `<your-auth>` and `<your-password>` with your VPN authentication details
 
 ### Command-Line Options
 
-- `--user-auth`: Your VPN user auth.
-- `--password`: Your VPN password.
+- `--user-auth`, `--password`: Your VPN user auth and password. Not needed when you log in with `--auth-code` or `--jwt`.
+- `--auth-code`: *(Optional)* Log in with an auth code, for networks that have no password accounts.
+- `--jwt`: *(Optional)* Use an existing network JWT and skip login.
 - `--country`: *(Optional)* Country to connect to (e.g., "United States").
 - `--region`: *(Optional)* Region within the country.
 - `--city`: *(Optional)* Specific city to connect through.
@@ -34,8 +35,12 @@ Replace `<your-auth>` and `<your-password>` with your VPN authentication details
 - `--socks-user`, `--socks-password`: *(Optional)* SOCKS5 username and password clients must send. Required when `--addr` is not a loopback address.
 - `--api-url`: *(Optional)* Custom API URL (default is `https://api.bringyour.com`).
 - `--platform-url`: *(Optional)* Custom platform URL (default is `wss://connect.bringyour.com`).
+- `--reliability`: *(Optional)* Path of a JSON file that overrides some reliability settings at startup. Durations are in milliseconds. A field the file leaves out keeps its default, and a field set to zero is applied.
+- `--metrics-every`: *(Optional)* Print reliability counters and the exit table every N milliseconds. `0` turns it off.
+- `--reset-metrics`: *(Optional)* Zero the reliability counters at startup.
+- `--control`: *(Optional, developer builds only)* Address of a local control server and web panel, for example `127.0.0.1:9998`. Release builds do not have it. Build it in with `make dev` or `go build -tags dev`. The control server has no authentication, so it accepts only loopback addresses and a matching `Host` header.
 
-Each option can also be set with an environment variable: `ADDR`, `USER_AUTH`, `PASSWORD`, `PROVIDER_ID`, `CITY`, `COUNTRY`, `REGION`, `SOCKS_USER`, `SOCKS_PASSWORD`, `API_URL`, `PLATFORM_URL`.
+Each option can also be set with an environment variable: `ADDR`, `USER_AUTH`, `PASSWORD`, `AUTH_CODE`, `JWT`, `PROVIDER_ID`, `CITY`, `COUNTRY`, `REGION`, `SOCKS_USER`, `SOCKS_PASSWORD`, `API_URL`, `PLATFORM_URL`, `RELIABILITY`, `METRICS_EVERY`, `RESET_METRICS` and, in developer builds, `CONTROL`.
 
 ### Example: Connecting via Provider ID
 

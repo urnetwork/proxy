@@ -5,6 +5,11 @@ all: clean build
 clean:
 	rm -rf build
 
+# dev adds the local control server and web panel (--control). The release
+# build target leaves them out.
+dev:
+	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 go build -tags dev -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/dev/
+
 build:
 	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/linux/arm64/
 	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=linux GOARCH=arm go build -trimpath -ldflags "-w -s -X main.Version=${WARP_VERSION}" -o build/linux/arm/
