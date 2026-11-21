@@ -39,6 +39,7 @@ require (
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/theodorsm/covert-dtls v1.5.1 // indirect
 	github.com/urnetwork/glog v0.0.0 // indirect
+	github.com/urnetwork/quic-go v0.0.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260727155853-b88d891fe743 // indirect
@@ -56,6 +57,11 @@ replace github.com/urnetwork/connect => ../connect
 replace github.com/pion/sctp => ../connect/sctp
 
 replace github.com/urnetwork/glog => ../glog
+
+// URnetwork's quic-go, its own module (../quic-go/URNETWORK.md).
+// Go ignores a dependency's replacements, so each main module that builds
+// connect selects the sibling checkout, as it does glog.
+replace github.com/urnetwork/quic-go => ../quic-go
 
 replace github.com/urnetwork/userwireguard => ../userwireguard
 
