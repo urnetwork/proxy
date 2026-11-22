@@ -35,7 +35,6 @@ require (
 	github.com/pion/turn/v5 v5.0.12 // indirect
 	github.com/pion/webrtc/v4 v4.2.18 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.61.0 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/theodorsm/covert-dtls v1.5.1 // indirect
 	github.com/urnetwork/glog v0.0.0 // indirect
