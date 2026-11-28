@@ -253,14 +253,26 @@ func (self *HttpProxy) ListenAndServe(ctx context.Context, network string, addr 
 	if err != nil {
 		return err
 	}
-	return self.serve(ctx, l, &http.Server{
+	return self.serve(ctx, l, self.newPlainHttpServer(addr))
+}
+
+// Serves plain http on a listener the caller bound, for a caller that chooses
+// the address or screens connections itself, such as a proxy bound to one
+// interface address. From the call the serving scope owns the listener, as
+// with ListenAndServe: it closes at hard shutdown, and a drain closes it.
+func (self *HttpProxy) Serve(ctx context.Context, l net.Listener) error {
+	return self.serve(ctx, l, self.newPlainHttpServer(l.Addr().String()))
+}
+
+func (self *HttpProxy) newPlainHttpServer(addr string) *http.Server {
+	return &http.Server{
 		Addr:         addr,
 		Handler:      self,
 		ReadTimeout:  self.settings.ProxyReadTimeout,
 		WriteTimeout: self.settings.ProxyWriteTimeout,
 		IdleTimeout:  self.settings.ProxyIdleTimeout,
 		ErrorLog:     discardLog,
-	})
+	}
 }
 
 // Listens for tls; certificate callbacks belong to the accepted connection lifetime.

@@ -192,8 +192,24 @@ func (self *SocksProxy) newServer() *socksServer {
 
 func (self *SocksProxy) ListenAndServe(ctx context.Context, network string, addr string) error {
 	server := self.ensureServer()
+	self.startStatsLog(ctx)
+	return server.ListenAndServe(ctx, network, addr)
+}
 
-	// one flusher, however many address families are served
+// Serves a listener the caller bound, for a caller that chooses the address or
+// screens connections itself, such as a proxy bound to one interface address.
+// From the call the serving scope owns the listener, as with ListenAndServe:
+// it closes when ctx ends, and a drain closes it. Stats are shared with every
+// other ListenAndServe and Serve of this proxy, and WaitStats joins them.
+func (self *SocksProxy) Serve(ctx context.Context, l net.Listener) error {
+	server := self.ensureServer()
+	self.startStatsLog(ctx)
+	return server.serve(ctx, l)
+}
+
+// Starts the one stats flusher of this proxy, however many listeners and
+// address families are served, on the first serving context.
+func (self *SocksProxy) startStatsLog(ctx context.Context) {
 	self.statsLogOnce.Do(func() {
 		done := make(chan struct{})
 		func() {
@@ -208,8 +224,6 @@ func (self *SocksProxy) ListenAndServe(ctx context.Context, network string, addr
 			})
 		}()
 	})
-
-	return server.ListenAndServe(ctx, network, addr)
 }
 
 // Joins this instance's single stats worker after its serving context is canceled.
